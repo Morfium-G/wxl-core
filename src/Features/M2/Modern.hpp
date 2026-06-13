@@ -13,7 +13,7 @@ namespace wraith::m2::modern
     constexpr uint32_t kVersionMax = 274;
     constexpr uint16_t kShaderMin  = 0x8000;   // a texunit shaderId >= this is a CM2Shared effect index
 
-    // M2ParticleOld emitter stride. wowdev M2.md: 476 by default; 492 when version > 271 (or flag 0x200).
+    // M2ParticleOld emitter stride. wowdev M2: 476 by default; 492 when version > 271 (or flag 0x200).
     // The native particle de-relocator hardcodes 476, so a v272 body's emitters must be slid down from 492
     // to 476 before native Init or its 2nd-emitter bounds-check reads garbage and rejects.
     constexpr uint32_t kParticleStride264    = 0x1dc;
