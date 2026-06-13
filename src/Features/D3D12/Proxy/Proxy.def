@@ -1,0 +1,7 @@
+LIBRARY d3d9
+EXPORTS
+    Direct3DCreate9
+    Direct3DCreate9Ex
+    WraithD3D12Device
+    WraithD3D12Queue
+    WraithD3D12DrainDebug
