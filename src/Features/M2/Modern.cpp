@@ -100,17 +100,25 @@ namespace
             // {int8 x, int8 y, int16 z}, not floats. Decompress each to the plain 264 float scalar
             // (+downward) and clear the flag; otherwise the 4 packed bytes read as a float can form a NaN
             // and poison the particle position. Two-level track: val outer {count,ofs} at emitter+0x90/+0x94
-            // (md-relative, pre-de-reloc); each outer element is an inner M2Array whose ofs points at the
-            // 4-byte keys. The keys live past the emitter array, untouched by the slide.
+            // (md-relative, pre-de-reloc); the outer array has one inner M2Array per animation index.
+            // Per-animation inner offsets are split like every other track: an EMBEDDED animation's keys are
+            // .m2-relative (decompress in place), an EXTERNAL animation's keys are .anim-relative and the
+            // .anim is not loaded here, so adding the .m2 base would land in unrelated .m2 data and corrupt
+            // it. Decompress only embedded slots (sequence flag 0x20 set), matching the engine's track split.
             if (flags & sdk::modern::kParticleFlagCompressedGravity)
             {
                 uint32_t outerCount = *reinterpret_cast<uint32_t*>(dst + sdk::modern::kParticleGravityValCountOff);
                 uint32_t outerOfs   = *reinterpret_cast<uint32_t*>(dst + sdk::modern::kParticleGravityValOfsOff);
+                uint8_t* seqs       = (md->sequences.count && md->sequences.offset) ? md->base() + md->sequences.offset : nullptr;
                 if (outerOfs && outerCount && outerCount <= 0x1000)
                 {
                     uint8_t* outer = md->base() + outerOfs;
                     for (uint32_t o = 0; o < outerCount; ++o)
                     {
+                        // Skip external animations: their gravity keys live in the .anim, not the .m2.
+                        if (seqs && o < md->sequences.count &&
+                            (*reinterpret_cast<uint32_t*>(seqs + o * 0x40 + 0x0c) & 0x20) == 0)
+                            continue;
                         uint32_t innerCount = *reinterpret_cast<uint32_t*>(outer + o * 8 + 0x0);
                         uint32_t innerOfs   = *reinterpret_cast<uint32_t*>(outer + o * 8 + 0x4);
                         if (!innerOfs || !innerCount || innerCount > 0x1000) continue;
@@ -586,7 +594,7 @@ namespace
         skin->submeshes    = sm;
         skin->submeshCount = static_cast<uint32_t>(outSections.size());
 
-        // Store a raw pointer: header M2Arrays are de-relocated by FinalizeSkin time and the native
+        // Store a raw pointer: header M2Arrays are de-relocated by skin finalize time and the native
         // finalize/draw read boneCombos as a pointer. Matches the textureUnitLookup/textureCombinerCombos commits.
         md->boneCombos.count  = static_cast<uint32_t>(newBoneCombos.size());
         md->boneCombos.offset = reinterpret_cast<uint32_t>(bc);
@@ -594,7 +602,7 @@ namespace
     }
 
     // Park a level>0 submesh (a level<<16|id sub-batch the 264 engine cannot draw) by zeroing its geometry
-    // and marking badSubmesh; keep boneCount >= 1 (native FinalizeSkin divides boneCountMax by every submesh
+    // and marking badSubmesh; keep boneCount >= 1 (native skin finalize divides boneCountMax by every submesh
     // boneCount). Clamp a drawn (level 0) submesh's boneCount to the SM3 ceiling and the boneCombos bounds
     // (>= 1), with a >= 1 bone-influence floor. A zero-geometry section is marked bad.
     void FixSubmeshes(sdk::M2Header* md, sdk::M2SkinProfile* skin, std::vector<uint8_t>& badSubmesh)
@@ -744,7 +752,7 @@ namespace
 
     // Builds the down-converted batch array. Most batches map 1:1; env effects split into a primary +
     // follower, so the array grows. The result is committed to skin->batches / skin->batchCount at the
-    // FinalizeSkin entry, before the native passes size their parallel +0x188 block from skin->batchCount,
+    // skin finalize entry, before the native passes size their parallel +0x188 block from skin->batchCount,
     // so the grow is seen and the block is sized correctly.
     // Down-convert one batch into 'piece' (1 batch, or primary+follower for an env split). Does not touch
     // skinSectionIndex; the caller re-points it per target sub-section.
@@ -877,7 +885,7 @@ namespace
         FixTexUnits(skin, badSubmesh, splitMap, batches, texUnitLookup, blendOverride, nTransparencyLookup);
 
         // Commit the grown batch array into an owned heap buffer and repoint the skin BEFORE the native
-        // FinalizeSkin (g_finalizeOriginal) sizes its +0x188 block from skin->batchCount. skin->batches was
+        // skin finalize (g_finalizeOriginal) sizes its +0x188 block from skin->batchCount. skin->batches was
         // file-mapped memory the engine never per-array frees, so leaking the old pointer is fine; the new
         // buffer is leaked for the model's lifetime (same pattern as the header arrays below).
         if (!batches.empty())

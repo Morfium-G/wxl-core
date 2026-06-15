@@ -27,18 +27,18 @@ namespace
         uint32_t size;
     };
 
-    using InitFn = int(__fastcall*)(void*);  // CM2Model::Init __thiscall(this)
+    using InitFn = int(__fastcall*)(void*);  // model init hook __thiscall(this)
     InitFn g_initOriginal = nullptr;
 
-    using FinalizeFn = void(__fastcall*)(void*);  // CM2Model::FinalizeSkin __thiscall(this)
+    using FinalizeFn = void(__fastcall*)(void*);  // skin finalize hook __thiscall(this)
     FinalizeFn g_finalizeOriginal = nullptr;
 
     // Ribbon de-relocator __cdecl(base, fileSize, ctx, &header.ribbonEmitters): pointer-fixes each ribbon's M2Arrays.
     using RibbonDeRelocFn = int(__cdecl*)(int base, unsigned int fileSize, int ctx, unsigned int* ribbons);
     RibbonDeRelocFn g_ribbonDeRelocOriginal = nullptr;
 
-    // CM2Model::FinalizeSkin entry: the skin (CM2Model+0x170) is attached and pointer-fixed and the header
-    // (CM2Model+0x150) is live, BEFORE the native shader-id passes run. Rebuild the 264 material contract a
+    // Skin finalize entry: the skin (model+0x170) is attached and pointer-fixed and the header
+    // (model+0x150) is live, BEFORE the native shader-id passes run. Rebuild the 264 material contract a
     // modern skin lacks so the first shader-id pass does not NULL-deref header.textureUnitLookup.
     void __fastcall FinalizeDetour(void* self)
     {
@@ -66,7 +66,7 @@ namespace
         return result;
     }
 
-    // CM2Model::Init: de-chunk the MD21 container, dispatch the per-version fixups, run the engine parse.
+    // Model init hook: de-chunk the MD21 container, dispatch the per-version fixups, run the engine parse.
     // The container and engine integration are version-agnostic; per-version deltas live in each version
     // contract (e.g. modern::ApplyFixups).
     int __fastcall InitDetour(void* self)
@@ -90,6 +90,7 @@ namespace
             modern::ApplyFixups(md, md20Size, origSize);
 
         int result = g_initOriginal(self);
+
         if (version > m2::kVersionWrath)   // only log the modern (post-264) models, not stock 264
             WLOG_INFO("MD21: '%s' version=%u result=%d", model->name(), version, result);
         return result;

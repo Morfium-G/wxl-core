@@ -81,16 +81,28 @@ namespace wraith::m2
         uint8_t* base() { return reinterpret_cast<uint8_t*>(this); }
     };
 
-    // One animation sequence, 0x40 bytes (the engine strides sequences by 0x40). blendTime at 0x1C is
-    // a single u32 in 264; Cata+/Legion split it into blendTimeIn(u16)+blendTimeOut(u16), so the down-
-    // converted dword must be masked to its low u16 to restore 264 semantics.
+    // One animation sequence, 0x40 bytes (the engine strides sequences by 0x40). The 12340 engine reads a
+    // SINGLE duration at 0x04 (build 12340 already uses the modern per-animation timeline, not the pre-Wrath
+    // start/end pair), flags at 0x0C, the replay (min,max) range at 0x14/0x18, variationNext/aliasNext at
+    // 0x3C/0x3E, and modulos the play time by duration. These match the modern (Cata+) layout for every
+    // field the engine consumes, so the record is NOT down-converted. blendTime at 0x1C is a single u32 in
+    // 264; Cata+/Legion split it into blendTimeIn(u16)+blendTimeOut(u16), so the dword is masked to its low
+    // u16 to restore 264 semantics. flags bit 0x20 = data embedded in the .m2; clear = streamed from .anim.
     struct M2Sequence
     {
         uint16_t id;             // 0x00  AnimationData.dbc id
         uint16_t variationIndex; // 0x02
-        uint8_t  _pad04[0x18];   // 0x04  start/end, movespeed, flags, frequency, padding, replay range
+        uint32_t duration;       // 0x04  milliseconds (play time is taken modulo this)
+        float    movespeed;      // 0x08
+        uint32_t flags;          // 0x0C  bit 0x20 = embedded; clear = external .anim
+        int16_t  frequency;      // 0x10
+        uint16_t _pad12;         // 0x12
+        uint32_t replayMin;      // 0x14
+        uint32_t replayMax;      // 0x18
         uint32_t blendTime;      // 0x1C  264: u32; Cata+: blendTimeIn(u16)|blendTimeOut(u16)
-        uint8_t  _pad20[0x20];   // 0x20  bounds, variationNext, aliasNext, bone ranges
+        uint8_t  _bounds[0x1C];  // 0x20  M2Bounds (CAaBox + radius)
+        int16_t  variationNext;  // 0x3C
+        uint16_t aliasNext;      // 0x3E
     };
 
     // One render batch (texunit), 0x18 bytes.
@@ -157,7 +169,7 @@ namespace wraith::m2
         float    sortRadius;        // 0x2C
     };
 
-    // The engine's parsed skin profile, hung off CM2Model+0x170. This is the LIVE in-memory object, NOT the
+    // The engine's parsed skin profile, hung off model+0x170. This is the LIVE in-memory object, NOT the
     // on-disk .skin: the parse prepends a 4-byte leading field, so every array sits 4 bytes higher than the
     // file layout (file vertexLookup M2Array@0x00 -> live vertexCount@0x04 / vertexLookup ptr@0x08, ...).
     // Array offsets are rewritten to raw pointers before the skin is finalized.
@@ -218,7 +230,12 @@ namespace wraith::m2
     static_assert(offsetof(M2Header, textureCombinerCombos) == 0x130, "textureCombinerCombos");
     static_assert(sizeof(M2Sequence) == 0x40, "M2Sequence");
     static_assert(offsetof(M2Sequence, variationIndex) == 0x02, "variationIndex");
+    static_assert(offsetof(M2Sequence, duration) == 0x04, "duration");
+    static_assert(offsetof(M2Sequence, flags) == 0x0C, "flags");
+    static_assert(offsetof(M2Sequence, replayMin) == 0x14, "replayMin");
     static_assert(offsetof(M2Sequence, blendTime) == 0x1C, "blendTime");
+    static_assert(offsetof(M2Sequence, variationNext) == 0x3C, "variationNext");
+    static_assert(offsetof(M2Sequence, aliasNext) == 0x3E, "aliasNext");
     static_assert(sizeof(M2Batch) == 0x18, "M2Batch");
     static_assert(offsetof(M2Batch, shaderId) == 0x02, "shaderId");
     static_assert(offsetof(M2Batch, materialIndex) == 0x0A, "materialIndex");
@@ -248,7 +265,7 @@ namespace wraith::m2
     // ---- Engine runtime views -----------------------------------------------------------------------
     // The engine's in-memory objects once a model is loaded (not the on-disk format).
 
-    // The engine CM2Model object (the loaded model asset, shared by all its instances).
+    // The engine's loaded model object (the model asset, shared by all its instances).
     struct CM2Model : EngineView
     {
         const char*    name() const { return at<const char>(0x3C); }   // INLINE full-path string

@@ -11,7 +11,7 @@ namespace wraith::m2::modern
 {
     constexpr uint32_t kVersionMin = 272;
     constexpr uint32_t kVersionMax = 274;
-    constexpr uint16_t kShaderMin  = 0x8000;   // a texunit shaderId >= this is a CM2Shared effect index
+    constexpr uint16_t kShaderMin  = 0x8000;   // a texunit shaderId >= this is a modern shader-effect index
 
     // M2ParticleOld emitter stride. wowdev M2: 476 by default; 492 when version > 271 (or flag 0x200).
     // The native particle de-relocator hardcodes 476, so a v272 body's emitters must be slid down from 492
@@ -81,8 +81,8 @@ namespace wraith::m2::modern
 //   - RebuildMaterials: re-derive the 264 material contract the native skin passes expect. A modern .skin
 //     encodes each batch's material in its own shaderId and leaves header.textureUnitLookup (0x88) empty;
 //     the WotLK skin's first shader-id pass indexes textureUnitLookup[batch.texCoordCombo] and NULL-derefs.
-//     Runs at the FinalizeSkin entry, where both the header (CM2Model+0x150) and the pointer-fixed skin
-//     (CM2Model+0x170) are live and BEFORE the shader-id passes size their parallel batch blocks.
+//     Runs at the skin finalize entry, where both the header (model+0x150) and the pointer-fixed skin
+//     (model+0x170) are live and BEFORE the shader-id passes size their parallel batch blocks.
 // [slackBegin, slackEnd) is the spare buffer past the inner MD20, available for table synthesis.
 namespace wraith::features::m2::modern
 {

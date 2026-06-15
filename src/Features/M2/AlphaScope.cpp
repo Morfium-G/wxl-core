@@ -30,7 +30,7 @@ namespace
     constexpr float kModernAlphaKeyRef = 0.5f;
 
     // True if the batch's model is a modern (>= 272) one and its material is blend mode 1 (alpha key).
-    // ctx->instance@0x60 -> CM2Instance::model@0x2c -> CM2Model::fileData()->version; the live material is
+    // ctx+0x60 -> instance, instance+0x2c -> model, model header holds version; the live material is
     // ctx+0x98 (set by the caller before the setter), blend mode = *(u16*)(mat+0x02).
     bool IsModernAlphaKeyBatch(void* ctx)
     {
