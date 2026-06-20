@@ -92,7 +92,7 @@ Output: `WarcraftXL.dll`. Vendored dependencies build with the project.
 Thanks to everyone who has helped shape WarcraftXL, with code, reverse-engineering, ideas, or feedback:
 
 - [Furioz](https://github.com/Furioz420)
-- [Tester](https://github.com/testertester)
+- [Tester](https://github.com/TesterWoWDev)
 - [Duskhaven](https://git.duskhaven.net/Duskhaven)
 
 ## Support
