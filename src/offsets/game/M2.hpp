@@ -79,6 +79,13 @@ namespace wxl::offsets::game::m2
     // Pushes the alpha-test reference to the device.
     constexpr uintptr_t kPushAlphaRef = 0x00873BA0;
 
+    // SetupBatchAlpha draw-context fields (this = the draw context): the instance being drawn and the live
+    // material the caller set. Instance -> model is kOffInstModel below.
+    constexpr size_t kOffDrawCtxInstance = 0x60; // draw context -> render instance
+    constexpr size_t kOffDrawCtxMaterial = 0x98; // draw context -> live material record
+    // Material record: the blend mode (1 = alpha key).
+    constexpr size_t kOffMaterialBlend   = 0x02;
+
     // --- bone palette (per-frame skinning matrices; the bone-physics hook point) ---
     // Per-instance bone-palette build (instance, ...): fills the bone matrices for one instance from
     // the current pose, each frame, before the batch draw uploads the palette to the vertex shader.
@@ -101,6 +108,10 @@ namespace wxl::offsets::game::m2
     constexpr uintptr_t kTexResolve = 0x004B6CB0;
     // Bind a texture to a sampler selector (device, selector, resolvedTexture).
     constexpr uintptr_t kSamplerBind = 0x00685F50;
+    // Sampler selectors for the engine bind path: s0 = 0x15, consecutive. The native ribbon loop binds
+    // only s0; the extra layers of a multi-texture ribbon are bound to s1/s2 so they survive one pass.
+    constexpr uint32_t kSamplerSelS1 = 0x16;
+    constexpr uint32_t kSamplerSelS2 = 0x17;
 
     // --- runtime instance object fields ---
     constexpr size_t kOffInstModel       = 0x2C; // -> runtime model

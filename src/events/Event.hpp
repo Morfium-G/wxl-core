@@ -33,6 +33,8 @@ namespace wxl::events
         OnWorldRender,   // per-frame world draw pass                  (WorldRenderArgs)
         OnWorldRenderEnd,// world -> UI boundary, the post-fx slot     (WorldRenderEndArgs)
         OnM2BatchDraw,   // one M2 triangle batch is drawing           (M2BatchDrawArgs)
+        OnM2SetupBatchAlpha, // an M2 batch's alpha/material is set up (M2SetupBatchAlphaArgs)
+        OnRibbonDraw,    // a ribbon emitter is about to draw          (RibbonDrawArgs)
         OnInput,         // window input message (swallowable)         (InputArgs)
         OnAdtChunkBuild, // an ADT map chunk is being built            (AdtChunkArgs)
         OnTextureUpload, // a texture is about to upload to the device (TextureUploadArgs)
@@ -61,6 +63,14 @@ namespace wxl::events
         uint32_t startIndex;
         uint32_t primCount;
     };
+    // One M2 batch's per-draw alpha/material setup, fired just after the native setter chose the alpha-test
+    // reference from the blend mode. A subscriber may re-push the reference (wxl::game::m2::PushAlphaRef)
+    // for the model / blend mode it recognizes. blendMode 1 = alpha key. model may be null (skip then).
+    struct M2SetupBatchAlphaArgs { void* model; uint16_t blendMode; };
+    // A ribbon emitter about to draw, fired before the native draw. A subscriber sets *useMultiTexture = true
+    // to request the single-pass multi-texture combine for a >= 3 layer ribbon (the core binds the extra
+    // layers and folds the passes into one). useMultiTexture is never null and starts false.
+    struct RibbonDrawArgs { void* emitter; uint32_t layerCount; bool* useMultiTexture; };
     // Window input. A subscriber that consumes the message sets `*handled = true`, which makes the core
     // swallow it (the game does not also react). `handled` is never null. Args are otherwise read-only.
     struct InputArgs         { uint32_t message; uintptr_t wparam; uintptr_t lparam; bool* handled; };

@@ -25,6 +25,8 @@
 #include "offsets/game/M2.hpp"
 #include "offsets/game/World.hpp"
 
+#include <windows.h>
+
 #include <cstdint>
 
 namespace
@@ -37,6 +39,7 @@ namespace
     namespace wld   = wxl::offsets::game::world;
 
     m2::M2_InitFn              g_origM2Init       = nullptr;
+    m2::M2_SetupBatchAlphaFn   g_origSetupAlpha   = nullptr;
     dd::SpawnFromMDDFFn        g_origDoodadSpawn  = nullptr;
     gxoff::TextureUpdateFn     g_origTexUpdate    = nullptr;
     adt::Map_ChunkBuildFn      g_origChunkBuild   = nullptr;
@@ -53,6 +56,32 @@ namespace
         ev::ModelLoadArgs a{ model };
         ev::Emit(ev::Event::OnModelLoad, &a);
         return r;
+    }
+
+    // Per-batch alpha/material setup (this-in-ECX = draw context). After the native setter chooses the
+    // alpha-test reference from the blend mode, resolve the model being drawn and its blend mode and
+    // publish them, so a subscriber can re-push a different reference for the content it recognizes. The
+    // draw-context reads are guarded: a malformed context must never fault the render thread.
+    void __fastcall hkSetupBatchAlpha(void* ctx)
+    {
+        g_origSetupAlpha(ctx);
+
+        void*    model = nullptr;
+        uint16_t blend = 0;
+        __try
+        {
+            void* inst = *reinterpret_cast<void**>(reinterpret_cast<char*>(ctx) + m2::kOffDrawCtxInstance);
+            void* mat  = *reinterpret_cast<void**>(reinterpret_cast<char*>(ctx) + m2::kOffDrawCtxMaterial);
+            if (inst) model = *reinterpret_cast<void**>(reinterpret_cast<char*>(inst) + m2::kOffInstModel);
+            if (mat)  blend = *reinterpret_cast<uint16_t*>(reinterpret_cast<char*>(mat) + m2::kOffMaterialBlend);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { model = nullptr; }
+
+        if (model)
+        {
+            ev::M2SetupBatchAlphaArgs a{ model, blend };
+            ev::Emit(ev::Event::OnM2SetupBatchAlpha, &a);
+        }
     }
 
     // Doodad spawn: build the CMapDoodad, then publish it (returned in EAX) so a module can track the
@@ -105,6 +134,9 @@ namespace wxl::runtime::game
         wxl::core::hook::Install("M2Init", m2::kInit,
                                  reinterpret_cast<void*>(&hkM2Init),
                                  reinterpret_cast<void**>(&g_origM2Init));
+        wxl::core::hook::Install("M2SetupBatchAlpha", m2::kSetupBatchAlpha,
+                                 reinterpret_cast<void*>(&hkSetupBatchAlpha),
+                                 reinterpret_cast<void**>(&g_origSetupAlpha));
         wxl::core::hook::Install("DoodadSpawn", dd::kSpawnFromMDDF,
                                  reinterpret_cast<void*>(&hkDoodadSpawn),
                                  reinterpret_cast<void**>(&g_origDoodadSpawn));
@@ -118,6 +150,6 @@ namespace wxl::runtime::game
                                  reinterpret_cast<void*>(&hkWorldEnter),
                                  reinterpret_cast<void**>(&g_origWorldEnter));
 
-        WLOG_INFO("game: hooks installed (M2Init, DoodadSpawn, TextureUpdate, ChunkBuild, CWorldEnter)");
+        WLOG_INFO("game: hooks installed (M2Init, M2SetupBatchAlpha, DoodadSpawn, TextureUpdate, ChunkBuild, CWorldEnter)");
     }
 }
