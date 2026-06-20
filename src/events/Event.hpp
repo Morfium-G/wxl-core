@@ -28,6 +28,7 @@ namespace wxl::events
     {
         OnModelLoadPre,  // a model's raw bytes are read, before parse (ModelLoadArgs)
         OnModelLoad,     // a model finished loading and is parsed     (ModelLoadArgs)
+        OnM2SkinFinalize,// a model's skin profile is being finalized  (M2SkinFinalizeArgs)
         OnFrame,         // per-frame Present                          (FrameArgs)
         OnEndScene,      // end of the frame, before present           (EndSceneArgs)
         OnWorldRender,   // per-frame world draw pass                  (WorldRenderArgs)
@@ -46,6 +47,10 @@ namespace wxl::events
 
     // Typed args, passed by const void* and reinterpreted by the subscriber for its event.
     struct ModelLoadArgs      { void* model; };
+    // A model's skin profile is finalized, fired BEFORE the native finalize sizes its parallel batch
+    // blocks. The window to rebuild a material/texunit contract a modern skin omits (read the header /
+    // skin via wxl::game::m2::Header / Skin). The header arrays are raw pointers by this point.
+    struct M2SkinFinalizeArgs { void* model; };
     struct FrameArgs          { void* device; };
     struct EndSceneArgs       { void* device; };
     struct WorldRenderArgs    { void* device; };

@@ -39,6 +39,7 @@ namespace
     namespace wld   = wxl::offsets::game::world;
 
     m2::M2_InitFn              g_origM2Init       = nullptr;
+    m2::M2_FinalizeSkinFn      g_origFinalizeSkin = nullptr;
     m2::M2_SetupBatchAlphaFn   g_origSetupAlpha   = nullptr;
     dd::SpawnFromMDDFFn        g_origDoodadSpawn  = nullptr;
     gxoff::TextureUpdateFn     g_origTexUpdate    = nullptr;
@@ -56,6 +57,16 @@ namespace
         ev::ModelLoadArgs a{ model };
         ev::Emit(ev::Event::OnModelLoad, &a);
         return r;
+    }
+
+    // Skin finalize (this-in-ECX = model). The skin profile is attached and pointer-fixed and the header
+    // is live, BEFORE the native finalize sizes its parallel batch blocks from skin->batchCount. Publish
+    // OnM2SkinFinalize here so a subscriber can rebuild a material/texunit contract a modern skin omits.
+    void __fastcall hkFinalizeSkin(void* model)
+    {
+        ev::M2SkinFinalizeArgs a{ model };
+        ev::Emit(ev::Event::OnM2SkinFinalize, &a);
+        g_origFinalizeSkin(model);
     }
 
     // Per-batch alpha/material setup (this-in-ECX = draw context). After the native setter chooses the
@@ -134,6 +145,9 @@ namespace wxl::runtime::game
         wxl::core::hook::Install("M2Init", m2::kInit,
                                  reinterpret_cast<void*>(&hkM2Init),
                                  reinterpret_cast<void**>(&g_origM2Init));
+        wxl::core::hook::Install("M2FinalizeSkin", m2::kFinalizeSkin,
+                                 reinterpret_cast<void*>(&hkFinalizeSkin),
+                                 reinterpret_cast<void**>(&g_origFinalizeSkin));
         wxl::core::hook::Install("M2SetupBatchAlpha", m2::kSetupBatchAlpha,
                                  reinterpret_cast<void*>(&hkSetupBatchAlpha),
                                  reinterpret_cast<void**>(&g_origSetupAlpha));
@@ -150,6 +164,6 @@ namespace wxl::runtime::game
                                  reinterpret_cast<void*>(&hkWorldEnter),
                                  reinterpret_cast<void**>(&g_origWorldEnter));
 
-        WLOG_INFO("game: hooks installed (M2Init, M2SetupBatchAlpha, DoodadSpawn, TextureUpdate, ChunkBuild, CWorldEnter)");
+        WLOG_INFO("game: hooks installed (M2Init, M2FinalizeSkin, M2SetupBatchAlpha, DoodadSpawn, TextureUpdate, ChunkBuild, CWorldEnter)");
     }
 }

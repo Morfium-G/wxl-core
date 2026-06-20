@@ -16,10 +16,12 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "game/Binding.hpp"
 #include "offsets/game/M2.hpp"
+#include "structure/m2/M2Format.hpp"
 
 // Curated M2 bindings. A module writes wxl::game::m2::ResolveTexture(h) instead of casting an address.
 // The wrappers are inline typed calls (zero overhead); RegisterCatalog() adds the names to the
@@ -51,6 +53,45 @@ namespace wxl::game::m2
     // The whole .m2 file is read into a heap buffer at model+0x150. The byte size is at model+0x16c.
     inline void*    FileBuffer(void* model) { return *reinterpret_cast<void**>   (reinterpret_cast<char*>(model) + off::kOffModelHeader); }
     inline uint32_t FileSize  (void* model) { return *reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(model) + off::kOffModelFileSize); }
+
+    // The parsed model header (the .m2 buffer is parsed in place, so the buffer base IS the header). Valid
+    // once the model is parsed (e.g. from OnModelLoad / OnM2SkinFinalize). Header M2Arrays hold RAW
+    // POINTERS by this point, not file offsets.
+    inline wxl::structure::m2::M2Header* Header(void* model)
+    {
+        return reinterpret_cast<wxl::structure::m2::M2Header*>(FileBuffer(model));
+    }
+
+    // The engine's live parsed skin profile, hung off the model object. NOT the on-disk skin: the parse
+    // prepends a 4-byte leading field, so the arrays sit 4 bytes higher than the file layout, and the
+    // count/pointer pairs are raw pointers. Valid at/after skin finalize (OnM2SkinFinalize). Indices are
+    // global into the model vertex/index pools.
+#pragma pack(push, 1)
+    struct M2SkinProfile
+    {
+        uint32_t                          _lead;        // 0x00  parse-prepended leading field
+        uint32_t                          vertexCount;  // 0x04
+        uint16_t*                         vertexLookup; // 0x08
+        uint32_t                          indexCount;   // 0x0C
+        uint16_t*                         indices;      // 0x10
+        uint32_t                          boneCount;    // 0x14
+        uint8_t*                          bones;        // 0x18
+        uint32_t                          submeshCount; // 0x1C
+        wxl::structure::m2::M2SkinSection* submeshes;   // 0x20
+        uint32_t                          batchCount;   // 0x24  (texunits)
+        wxl::structure::m2::M2Batch*      batches;      // 0x28
+        uint32_t                          boneCountMax; // 0x2C  per-draw bone budget seed
+    };
+#pragma pack(pop)
+    static_assert(sizeof(M2SkinProfile) == 0x30, "M2SkinProfile");
+    static_assert(offsetof(M2SkinProfile, submeshes) == 0x20, "M2SkinProfile.submeshes");
+    static_assert(offsetof(M2SkinProfile, batches) == 0x28, "M2SkinProfile.batches");
+
+    // The live parsed skin profile for a model (model+0x170), or null before it is attached.
+    inline M2SkinProfile* Skin(void* model)
+    {
+        return *reinterpret_cast<M2SkinProfile**>(reinterpret_cast<char*>(model) + off::kOffModelSkin);
+    }
 
     // Allocate / free a buffer with the SAME allocator the .m2 load buffer uses, so a replacement buffer is
     // freed correctly by the model destructor (it relies on the back-shift byte at [ptr-1]). The caller

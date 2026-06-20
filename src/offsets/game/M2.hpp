@@ -123,6 +123,7 @@ namespace wxl::offsets::game::m2
     constexpr size_t kOffModelPathStem = 0x3C;  // model path stem (no extension)
     constexpr size_t kOffModelHeader   = 0x150; // -> raw .m2 file buffer (parsed in place -> becomes the header)
     constexpr size_t kOffModelFileSize = 0x16C; // byte size of the .m2 file buffer at +0x150
+    constexpr size_t kOffModelSkin     = 0x170; // -> live parsed skin profile (valid at/after skin finalize)
 
     // --- parsed file-header fields ---
     constexpr size_t kOffHdrGlobalFlags = 0x10; // bit 0x20 = model carries physics

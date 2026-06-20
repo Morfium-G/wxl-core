@@ -111,6 +111,43 @@ namespace wxl::structure::m2
     // texture.type 0 = hardcoded: the only type whose pixels come from a named file.
     constexpr uint32_t kTexTypeHardcoded = 0;
 
+    // One render batch (texunit), 0x18 bytes. shaderId selects the program; materialIndex indexes
+    // header.materials (render flags + blend); textureCoordComboIndex indexes header.textureUnitLookup.
+    struct M2Batch
+    {
+        uint8_t  flags;                      // 0x00
+        uint8_t  priorityPlane;              // 0x01
+        uint16_t shaderId;                   // 0x02
+        uint16_t skinSectionIndex;           // 0x04
+        uint16_t geosetIndex;                // 0x06
+        uint16_t colorIndex;                 // 0x08
+        uint16_t materialIndex;              // 0x0A  index into header.materials
+        uint16_t materialLayer;             // 0x0C
+        uint16_t textureCount;               // 0x0E
+        uint16_t textureComboIndex;          // 0x10
+        uint16_t textureCoordComboIndex;     // 0x12  index into header.textureUnitLookup
+        uint16_t textureWeightComboIndex;    // 0x14
+        uint16_t textureTransformComboIndex; // 0x16
+    };
+
+    // One skin submesh, 0x30 bytes. level > 0 = a (level<<16 | id) sub-batch the loader does not handle.
+    struct M2SkinSection
+    {
+        uint16_t skinSectionId;     // 0x00
+        uint16_t level;             // 0x02
+        uint16_t vertexStart;       // 0x04
+        uint16_t vertexCount;       // 0x06
+        uint16_t indexStart;        // 0x08
+        uint16_t indexCount;        // 0x0A
+        uint16_t boneCount;         // 0x0C
+        uint16_t boneComboIndex;    // 0x0E
+        uint16_t boneInfluences;    // 0x10
+        uint16_t centerBoneIndex;   // 0x12
+        float    centerPosition[3]; // 0x14
+        float    sortCenterPos[3];  // 0x20
+        float    sortRadius;        // 0x2C
+    };
+
     // One ribbon emitter, 0xb0. textureIndices/materialIndices index header.textures/materials.
     struct M2Ribbon
     {
@@ -145,6 +182,12 @@ namespace wxl::structure::m2
     static_assert(sizeof(M2Sequence) == 0x40, "M2Sequence");
     static_assert(offsetof(M2Sequence, blendTime) == 0x1C, "blendTime");
     static_assert(sizeof(M2Texture) == 0x10, "M2Texture");
+    static_assert(sizeof(M2Batch) == 0x18, "M2Batch");
+    static_assert(offsetof(M2Batch, shaderId) == 0x02, "M2Batch.shaderId");
+    static_assert(offsetof(M2Batch, materialIndex) == 0x0A, "M2Batch.materialIndex");
+    static_assert(offsetof(M2Batch, textureCount) == 0x0E, "M2Batch.textureCount");
+    static_assert(sizeof(M2SkinSection) == 0x30, "M2SkinSection");
+    static_assert(offsetof(M2SkinSection, level) == 0x02, "M2SkinSection.level");
     static_assert(sizeof(M2Ribbon) == 0xB0, "M2Ribbon");
     static_assert(sizeof(M2Camera) == 0x64, "M2Camera");
 }
