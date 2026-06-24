@@ -23,7 +23,9 @@
 
 #include <windows.h>
 #include <atomic>
+#include <cctype>
 #include <mutex>
+#include <string>
 
 using namespace wxl::ipc;
 
@@ -187,6 +189,31 @@ namespace
 namespace wxl::runtime::ipc
 {
     /**
+     * @brief Whether the host console is requested for this run.
+     *
+     * Opt-in two ways: a "WarcraftXLConsole.flag" file next to the client, or launching Wow.exe with
+     * the "-wxlconsole" argument (matched case-insensitively anywhere in the command line).
+     * @param root  the client/module directory holding the optional flag file.
+     * @return true if either signal is present.
+     */
+    static bool ConsoleRequested(const std::string& root)
+    {
+        if (GetFileAttributesA((root + "\\WarcraftXLConsole.flag").c_str()) != INVALID_FILE_ATTRIBUTES)
+            return true;
+
+        const char* cmd = GetCommandLineA();
+        if (!cmd) return false;
+        static const char kFlag[] = "wxlconsole"; // lower-case; the leading dashes are not matched
+        for (const char* p = cmd; *p; ++p)
+        {
+            size_t i = 0;
+            while (kFlag[i] && std::tolower(static_cast<unsigned char>(p[i])) == kFlag[i]) ++i;
+            if (kFlag[i] == '\0') return true;
+        }
+        return false;
+    }
+
+    /**
      * @brief Launches the asset host if not already running, after firing OnBeforeHostLaunch.
      */
     void EnsureHostRunning()
@@ -204,8 +231,8 @@ namespace wxl::runtime::ipc
         wxl::events::Emit(wxl::events::Event::OnBeforeHostLaunch, &a);
         if (cancel) return;
 
-        // A "WarcraftXLConsole.flag" file next to the client turns the host console on (opt-in at runtime).
-        bool console = GetFileAttributesA((root + "\\WarcraftXLConsole.flag").c_str()) != INVALID_FILE_ATTRIBUTES;
+        // Opt-in via the flag file next to the client or the "-wxlconsole" launch argument on Wow.exe.
+        bool console = ConsoleRequested(root);
 
         // --client-pid lets the host exit when this client closes; --console enables its console output.
         char cmd[160];
