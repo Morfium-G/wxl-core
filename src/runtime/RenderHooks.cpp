@@ -208,9 +208,11 @@ namespace
     using SetRTFn   = long (__stdcall*)(void*, unsigned long, void*);
     using SetDSFn   = long (__stdcall*)(void*, void*);
     using GxSetRTFn = void (__fastcall*)(void*, void*, int, int, int);
+    using ResetFn   = long (__stdcall*)(void*, D3DPRESENT_PARAMETERS*);
     SetRTFn   g_origSetRT    = nullptr;
     SetDSFn   g_origSetDS    = nullptr;
     GxSetRTFn g_origGxSetRT  = nullptr;
+    ResetFn   g_origReset    = nullptr;
     off::GxSetProjectionFn g_origGxSetProjection = nullptr;  // engine projection-upload trampoline (observer)
     off::GlueModelRenderFn g_origGlueModelRender = nullptr;  // CSimpleModelFFX::Render trampoline (glue boundary)
     void*     g_hookedDevice = nullptr;                // device whose vtable currently carries the render hooks
@@ -817,6 +819,54 @@ namespace
         VirtualProtect(&vtbl[idx], sizeof(void*), old, &old);
     }
 
+    /**
+     * @brief Detours IDirect3DDevice9::Reset (a resolution / window resize). D3D9 requires every
+     *        D3DPOOL_DEFAULT resource released before a Reset or it fails (D3DERR_INVALIDCALL) and the device is
+     *        lost -- the resize "crash". Disarm the supersampling redirect and free the offscreen world surfaces
+     *        (g_ssaaColor / g_worldDepth, both DEFAULT pool) plus any tracked engine render targets, fire
+     *        OnDeviceLost, run the native Reset, then fire OnDeviceReset on success so subscribers recreate. The
+     *        SSAA surfaces themselves recreate lazily on the next SsaaArmFrame, at the new backbuffer size.
+     * @param dev     the D3D9 device being reset.
+     * @param params  the present parameters the device resets with (new size / window mode).
+     * @return the native Reset result.
+     */
+    long __stdcall hkReset(void* dev, D3DPRESENT_PARAMETERS* params)
+    {
+        static unsigned resetLog = 0;
+        const bool logThis = resetLog < 16;
+        if (logThis)
+        {
+            ++resetLog;
+            WLOG_INFO("render: Reset begin %ux%u windowed=%u",
+                      params ? params->BackBufferWidth : 0,
+                      params ? params->BackBufferHeight : 0,
+                      params ? static_cast<unsigned>(params->Windowed) : 0);
+        }
+
+        ev::DeviceResetArgs a{ dev, params };
+        g_colorRedirect = g_depthRedirect = false;
+        ReleaseTargets();             // free the offscreen SSAA color + world depth (DEFAULT pool)
+        gx::ReleaseResetResources();  // free any tracked engine render targets (DEFAULT pool)
+        ev::Emit(ev::Event::OnDeviceLost, &a);
+
+        const long r = g_origReset(dev, params);
+        if (SUCCEEDED(r))
+        {
+            ev::Emit(ev::Event::OnDeviceReset, &a);
+            if (logThis) WLOG_INFO("render: Reset ok");
+        }
+        else
+        {
+            static unsigned logged = 0;
+            if (logged < 8)
+            {
+                ++logged;
+                WLOG_WARN("render: Reset failed hr=0x%08lX", static_cast<unsigned long>(r));
+            }
+        }
+        return r;
+    }
+
     // Installs all render vtable hooks on the live device. Each device instance may have its own vtable, so on
     // a device recreate the swaps are gone; this re-applies them on the current device. The function-entry
     // render hook survives the recreate and calls this each frame, so OnEndScene/OnFrame and the supersampling
@@ -834,6 +884,7 @@ namespace
             SwapVtbl(vtbl, off::vt::kPresent,              reinterpret_cast<void*>(&hkPresent),         reinterpret_cast<void**>(&g_origPresent));
             SwapVtbl(vtbl, off::vt::kSetRenderTarget,      reinterpret_cast<void*>(&hkSetRenderTarget), reinterpret_cast<void**>(&g_origSetRT));
             SwapVtbl(vtbl, off::vt::kSetDepthStencil,      reinterpret_cast<void*>(&hkSetDepthStencil), reinterpret_cast<void**>(&g_origSetDS));
+            SwapVtbl(vtbl, off::vt::kReset,                reinterpret_cast<void*>(&hkReset),           reinterpret_cast<void**>(&g_origReset));
             WLOG_INFO("render: device hooks installed (dev=%p)", (void*)dev);
         }
         g_hookedDevice = dev;

@@ -19,6 +19,8 @@
 #include <d3d9.h>
 #include <d3dcompiler.h>
 #include <cstring>
+#include <algorithm>
+#include <vector>
 
 namespace wxl::game::gx
 {
@@ -44,6 +46,23 @@ namespace wxl::game::gx
         hr = d3ddev->CreatePixelShader(static_cast<const DWORD*>(code->GetBufferPointer()), &ps);
         code->Release();
         return SUCCEEDED(hr) ? ps : nullptr;
+    }
+
+    // Render targets created through EnsureBackbufferTarget are D3DPOOL_DEFAULT, so they must be released before
+    // the engine resets the device (a window resize). They register here on creation and are freed together by
+    // ReleaseResetResources, called from the device-reset hook.
+    std::vector<RenderTarget*>& ResetTargets()
+    {
+        static std::vector<RenderTarget*> targets;
+        return targets;
+    }
+
+    /** @brief Registers a render target so a device reset releases it (idempotent). */
+    void TrackResetTarget(RenderTarget& rt)
+    {
+        auto& targets = ResetTargets();
+        if (std::find(targets.begin(), targets.end(), &rt) == targets.end())
+            targets.push_back(&rt);
     }
 
     /**
@@ -75,7 +94,32 @@ namespace wxl::game::gx
         rt.surface = surf;
         rt.width   = static_cast<int>(desc.Width);
         rt.height  = static_cast<int>(desc.Height);
+        TrackResetTarget(rt);   // free it before the next device reset
         return true;
+    }
+
+    /**
+     * @brief Releases a render target's surface + texture and zeroes it so EnsureBackbufferTarget recreates it.
+     * @param rt  the render target to release.
+     */
+    void Release(RenderTarget& rt)
+    {
+        Release(rt.surface);
+        Release(rt.texture);
+        rt.surface = nullptr;
+        rt.texture = nullptr;
+        rt.width   = 0;
+        rt.height  = 0;
+    }
+
+    /**
+     * @brief Releases every tracked render target (D3DPOOL_DEFAULT) so the engine's device reset does not fail
+     *        on a still-live resource. Called from the reset hook before IDirect3DDevice9::Reset.
+     */
+    void ReleaseResetResources()
+    {
+        for (RenderTarget* rt : ResetTargets())
+            if (rt) Release(*rt);
     }
 
     /**

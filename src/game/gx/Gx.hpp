@@ -272,6 +272,19 @@ namespace wxl::game::gx
     bool EnsureBackbufferTarget(Device9 dev, RenderTarget& rt, uint32_t d3dFormat);
 
     /**
+     * @brief Releases a render target's surface + texture and zeroes it (so the next EnsureBackbufferTarget
+     *        recreates it). Used on a device reset, where every D3DPOOL_DEFAULT resource must be freed.
+     * @param rt  the render target to release.
+     */
+    void Release(RenderTarget& rt);
+
+    /**
+     * @brief Releases every render target that passed through EnsureBackbufferTarget. Called before a device
+     *        reset (window resize) so the engine's Reset does not fail on a still-live D3DPOOL_DEFAULT resource.
+     */
+    void ReleaseResetResources();
+
+    /**
      * @brief Draws a back-buffer-sized textured quad.
      * @param dev  the device to draw on.
      *
