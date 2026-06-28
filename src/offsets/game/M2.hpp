@@ -28,7 +28,19 @@ namespace wxl::offsets::game::m2
     constexpr uintptr_t kInit = 0x0083CF00;
     // Skin-profile finalizer: runs once after the skin sub-arrays resolve and before the shader passes
     // size their batch blocks. The point to rebuild the material contract a modern skin omits.
+    // CAUTION: calls kBuildBatchMaterial per batch. kBuildBatchMaterial crashes (EBX=0 null-deref at
+    // 0x836D11) when M2Batch::shaderId has bit 0x8000 set AND (shaderId & 0x7FFF) > 3 — a missing
+    // switch case patched by our hkBuildBatchMaterial hook. Calling kFinalizeSkin a second time
+    // also leaks model+0x18C (submesh copy), model+0x188 (per-submesh objects), [model+0x150]+0x40
+    // (IB staging buffer) — no free-before-write; acceptable for infrequent equip cycles.
     constexpr uintptr_t kFinalizeSkin = 0x00837A40;
+    // Per-batch material-key builder: thiscall (ECX=model), 1 stack arg (batch ptr from skin->batches).
+    // Called by kFinalizeSkin once per skin batch; result stored in model+0x188 array.
+    // Reads M2Batch::shaderId (batch+2): bit 0x8000 selects the path; bits 0-14 index the switch.
+    // Switch handles values 0-3 only; values > 3 with bit 0x8000 are an unimplemented case that
+    // crashes. Hook (hkBuildBatchMaterial in GameHooks.cpp) returns nullptr to skip those safely.
+    constexpr uintptr_t kBuildBatchMaterial = 0x00836C90;
+    using M2_BuildBatchMaterialFn = void* (__thiscall*)(void* model, void* batchPtr);
 
     // Version-gate branches in the loader. The stock loader accepts only one inner version; these are
     // the two compare branches that reject higher inner versions.
@@ -89,6 +101,13 @@ namespace wxl::offsets::game::m2
     // --- bone palette (per-frame skinning matrices; the bone-physics hook point) ---
     // Per-instance bone-palette build (instance, ...): fills the bone matrices for one instance from
     // the current pose, each frame, before the batch draw uploads the palette to the vertex shader.
+    // Called from two sites per collection model per frame:
+    //   (a) sub_8309C0 (kUpdateAttachedModels, called from inside kM2PerFrameUpdate of the parent)
+    //   (b) the outer scene-traversal loop at 0x821B4E (iterates the full scene linked list)
+    // Site (b) fires AFTER the parent's kM2PerFrameUpdate completes (and therefore after the
+    // OnM2PerFrameUpdate event). Hooking kBuildBonePalette and re-applying the CharSweep in the
+    // POST-hook guarantees the bone copy is the last write before GPU upload, regardless of
+    // scene-list ordering. Both sites use fastcall (ecx = instance) with 5 stack args; ret 0x14.
     constexpr uintptr_t kBuildBonePalette = 0x0082F0F0;
 
     // --- track evaluators (sampled per bone / per light each frame from the bone-palette build) ---
@@ -113,29 +132,83 @@ namespace wxl::offsets::game::m2
     constexpr uint32_t kSamplerSelS1 = 0x16;
     constexpr uint32_t kSamplerSelS2 = 0x17;
 
+    // --- attachment / render-context functions ---
+    // GetRenderCtx(cmo, keyBuf): returns the per-model render context for the given CharModelObject
+    // and key buffer; allocates one if absent.
+    constexpr uintptr_t kGetRenderCtx       = 0x0081F8F0;
+    // AttachToScene(renderCtx, subObj, slot): attaches a collection-M2 render context to a scene slot
+    // on the parent CharModelObject render context.
+    constexpr uintptr_t kAttachToScene      = 0x00831630;
+    // DetachSlot(subObj, slot): detaches the M2 bound to a scene slot, releasing its render context.
+    constexpr uintptr_t kDetachSlot         = 0x00827560;
+    // ReleaseRenderCtx(renderCtx): releases a render context obtained from GetRenderCtx.
+    constexpr uintptr_t kReleaseRenderCtx   = 0x00824ED0;
+    // BindTexSlot(renderCtx, modelPtr): binds the M2 model resource to texture slot key 2 (main texture).
+    constexpr uintptr_t kBindTexSlot        = 0x00825260;
+    // LoadResource(path, flags): loads a resource by virtual path through the resource-loader object.
+    constexpr uintptr_t kLoadResource       = 0x004B9760;
+    // ReleaseResource(resource): releases a resource handle returned by LoadResource.
+    constexpr uintptr_t kReleaseResource    = 0x0047BF30;
+    // Global resource-loader singleton (this for kLoadResource).
+    constexpr uintptr_t kResourceLoaderBase = 0x00AC46D0;
+
+    // --- character-model slot hooks ---
+    // Per-render-ctx per-frame update: fires once per visible M2 instance per frame, recursively
+    // through the scene graph. Hooked to drive bone-matrix copy and geoset filtering.
+    constexpr uintptr_t kM2PerFrameUpdate      = 0x00828A00;
+    // CharModel equip-slot handler (cmo, modelSlot, itemDataPtr, postFlag): dispatches an item to
+    // an internal model slot, building paths and loading the M2.
+    constexpr uintptr_t kCharModelSlotDispatch = 0x004F2640;
+    // CharModel equip-slot clear (cmo, equipSlotWow): clears the WoW equipment slot on the CMO,
+    // detaching any attached M2 and releasing its render context.
+    constexpr uintptr_t kCharModelSlotClear    = 0x004EE6D0;
+
     // --- runtime instance object fields ---
-    constexpr size_t kOffInstModel       = 0x2C; // -> runtime model
-    constexpr size_t kOffInstBonePalette = 0x98; // -> bone matrices, row-major 4x4
-    constexpr size_t kBonePaletteStride  = 0x40; // one bone matrix
+    constexpr size_t kOffInstInitFlags      = 0x10;  // init flags (bit 0 = anim init done; bit 6 = char-select present)
+    constexpr size_t kOffInstModel          = 0x2C;  // -> runtime model
+    constexpr size_t kOffInstBonePalette    = 0x98;  // -> bone matrices, row-major 4x4
+    constexpr size_t kBonePaletteStride     = 0x40;  // one bone matrix
+    // Array of render-object pointers (4 bytes each), indexed by M2SkinProfile batch index.
+    // Read by sub_828A00 to call sub_97f570 which controls per-batch draw visibility.
+    constexpr size_t kOffInstRenderObjArray = 0x2BC; // -> void*[] (one pointer per skin batch)
+    // Visibility flags written by sub_97f570 into each render object.
+    // Bit 2 = 1 → batch visible; bit 2 = 0 → batch hidden (bit 0 also cleared when hiding).
+    constexpr size_t kOffRenderObjFlags     = 0x160;
 
     // --- runtime model object fields ---
-    constexpr size_t kOffModelFlags    = 0x08;  // bit 2 selects the sibling-file open flag
-    constexpr size_t kOffModelPathStem = 0x3C;  // model path stem (no extension)
-    constexpr size_t kOffModelHeader   = 0x150; // -> raw .m2 file buffer (parsed in place -> becomes the header)
-    constexpr size_t kOffModelFileSize = 0x16C; // byte size of the .m2 file buffer at +0x150
-    constexpr size_t kOffModelSkin     = 0x170; // -> live parsed skin profile (valid at/after skin finalize)
+    constexpr size_t kOffModelFlags         = 0x08;  // bit 2 selects the sibling-file open flag
+    constexpr size_t kOffModelPathStem      = 0x3C;  // model path stem (no extension)
+    constexpr size_t kOffModelHeader        = 0x150; // -> raw .m2 file buffer (parsed in place -> becomes the header)
+    constexpr size_t kOffModelFileSize      = 0x16C; // byte size of the .m2 file buffer at +0x150
+    constexpr size_t kOffModelSkin          = 0x170; // -> live parsed skin profile (valid at/after skin finalize)
+    constexpr size_t kOffModelSubMeshCopy   = 0x188; // -> per-submesh object array ptr (written by kFinalizeSkin; not freed on re-call)
+    constexpr size_t kOffModelSubmeshBuf    = 0x18C; // -> submesh copy buffer ptr (written by kFinalizeSkin; not freed on re-call)
+    constexpr size_t kOffModelFinalizeDone  = 0x190; // uint32: set to 1 by kFinalizeSkin after IB is built; scheduler checks before re-calling
+    constexpr size_t kOffModelLodMultiplier = 0x194; // uint32: LOD multiplier computed by kFinalizeSkin (65536 / batch stride, running min)
 
     // --- parsed file-header fields ---
-    constexpr size_t kOffHdrGlobalFlags = 0x10; // bit 0x20 = model carries physics
-    constexpr size_t kOffHdrBoneCount   = 0x2C;
-    constexpr size_t kOffHdrBoneArray   = 0x30; // -> bone records (post-fixup data ptr)
+    constexpr size_t kOffHdrGlobalFlags    = 0x10; // bit 0x20 = model carries physics
+    constexpr size_t kOffHdrBoneCount      = 0x2C;
+    constexpr size_t kOffHdrBoneArray      = 0x30; // -> bone records (post-fixup data ptr)
+    constexpr size_t kOffHdrBoneIdxLutCount= 0xF8; // count of bone-index-by-id LUT entries
+    constexpr size_t kOffHdrBoneIdxLutPtr  = 0xFC; // -> bone-index-by-id LUT (uint16 array, indexed by key_bone_id)
 
     // --- bone record fields (in the header bone array) ---
-    constexpr size_t   kBoneStride     = 0x58;
-    constexpr size_t   kOffBoneFlags   = 0x04; // bone flags
-    constexpr size_t   kOffBoneParent  = 0x08; // int16 parent index (0xFFFF = root)
-    constexpr size_t   kOffBonePivot   = 0x4C; // pivot (bone origin in bind space)
+    constexpr size_t   kBoneStride        = 0x58;
+    constexpr size_t   kOffBoneKeyId      = 0x00; // key_bone_id: canonical slot id (negative = none)
+    constexpr size_t   kOffBoneFlags      = 0x04; // bone flags
+    constexpr size_t   kOffBoneParent     = 0x08; // int16 parent index (0xFFFF = root)
+    constexpr size_t   kOffBoneNameCrc    = 0x0C; // CRC32 of the bone name string (for name-based remap)
+    constexpr size_t   kOffBonePivot      = 0x4C; // pivot (bone origin in bind space)
     constexpr uint32_t kBoneBillboardMask = 0x78; // spherical + cylindrical-lock bits
+
+    // --- CharModelObject fields ---
+    constexpr size_t kOffCmoRace      = 0x18; // uint32 race id
+    constexpr size_t kOffCmoGender    = 0x1C; // uint32 gender (0 = male, 1 = female)
+    constexpr size_t kOffCmoSceneNode = 0x38; // -> SceneNode (the root scene node for this character)
+
+    // --- SceneNode fields ---
+    constexpr size_t kOffSceneNodeOwner = 0x28; // -> CharModelObject that owns this scene node
 
     // --- track object fields read by the evaluators ---
     constexpr size_t kOffTrackTimestampsCount = 0x04;
@@ -194,16 +267,22 @@ namespace wxl::offsets::game::m2
     };
     static_assert(offsetof(Material, blend) == kOffMaterialBlend, "Material.blend");
 
-    /** @brief Runtime instance: the model it draws and the per-frame bone-matrix palette. */
+    /** @brief Runtime instance (= render context wrapper returned by GetRenderCtx).
+     *         Both the character's scene node (cmo+0x38) and collection M2 render contexts
+     *         share this layout. The model it draws, its init flags, and a pointer to the
+     *         heap-allocated per-frame bone-matrix output buffer (stride kBonePaletteStride). */
     struct M2Instance
     {
-        uint8_t  _pad00[kOffInstModel];
-        void*    model;            // kOffInstModel -> M2Model
+        uint8_t  _pad00[kOffInstInitFlags];
+        uint32_t initFlags;        // kOffInstInitFlags (bit 0 = anim init done; bit 1 = geometry ready)
+        uint8_t  _pad14[kOffInstModel - (kOffInstInitFlags + sizeof(uint32_t))];
+        void*    model;            // kOffInstModel -> M2Model (raw M2 instance)
         uint8_t  _pad30[kOffInstBonePalette - (kOffInstModel + sizeof(void*))];
-        float    bonePalette[1];   // kOffInstBonePalette (bone matrices, row-major 4x4, kBonePaletteStride each)
+        void*    bonePalettePtr;   // kOffInstBonePalette -> heap bone-matrix buffer (row-major 4x4, kBonePaletteStride each)
     };
-    static_assert(offsetof(M2Instance, model)       == kOffInstModel,       "M2Instance.model");
-    static_assert(offsetof(M2Instance, bonePalette) == kOffInstBonePalette, "M2Instance.bonePalette");
+    static_assert(offsetof(M2Instance, initFlags)     == kOffInstInitFlags,   "M2Instance.initFlags");
+    static_assert(offsetof(M2Instance, model)         == kOffInstModel,       "M2Instance.model");
+    static_assert(offsetof(M2Instance, bonePalettePtr)== kOffInstBonePalette, "M2Instance.bonePalettePtr");
 
     /** @brief Runtime model: flags, path stem, the parsed .m2 buffer, its size, and the live skin profile. */
     struct M2Model
@@ -223,31 +302,40 @@ namespace wxl::offsets::game::m2
     static_assert(offsetof(M2Model, fileSize) == kOffModelFileSize, "M2Model.fileSize");
     static_assert(offsetof(M2Model, skin)     == kOffModelSkin,     "M2Model.skin");
 
-    /** @brief Parsed file header: the global flags and the post-fixup bone array. */
+    /** @brief Parsed file header: the global flags, bone array, and bone-index-by-id LUT. */
     struct M2FileHeader
     {
         uint8_t  _pad00[kOffHdrGlobalFlags];
-        uint32_t globalFlags;      // kOffHdrGlobalFlags (bit 0x20 = model carries physics)
+        uint32_t globalFlags;       // kOffHdrGlobalFlags (bit 0x20 = model carries physics)
         uint8_t  _pad14[kOffHdrBoneCount - (kOffHdrGlobalFlags + sizeof(uint32_t))];
-        uint32_t boneCount;        // kOffHdrBoneCount
-        void*    boneArray;        // kOffHdrBoneArray -> M2Bone records (post-fixup data ptr)
+        uint32_t boneCount;         // kOffHdrBoneCount
+        void*    boneArray;         // kOffHdrBoneArray -> M2Bone records (post-fixup data ptr)
+        uint8_t  _pad34[kOffHdrBoneIdxLutCount - (kOffHdrBoneArray + sizeof(void*))];
+        uint32_t boneIdxLutCount;   // kOffHdrBoneIdxLutCount (number of entries in the LUT)
+        void*    boneIdxLutPtr;     // kOffHdrBoneIdxLutPtr -> uint16 array indexed by key_bone_id
     };
-    static_assert(offsetof(M2FileHeader, globalFlags) == kOffHdrGlobalFlags, "M2FileHeader.globalFlags");
-    static_assert(offsetof(M2FileHeader, boneCount)   == kOffHdrBoneCount,   "M2FileHeader.boneCount");
-    static_assert(offsetof(M2FileHeader, boneArray)   == kOffHdrBoneArray,   "M2FileHeader.boneArray");
+    static_assert(offsetof(M2FileHeader, globalFlags)    == kOffHdrGlobalFlags,     "M2FileHeader.globalFlags");
+    static_assert(offsetof(M2FileHeader, boneCount)      == kOffHdrBoneCount,       "M2FileHeader.boneCount");
+    static_assert(offsetof(M2FileHeader, boneArray)      == kOffHdrBoneArray,       "M2FileHeader.boneArray");
+    static_assert(offsetof(M2FileHeader, boneIdxLutCount)== kOffHdrBoneIdxLutCount, "M2FileHeader.boneIdxLutCount");
+    static_assert(offsetof(M2FileHeader, boneIdxLutPtr)  == kOffHdrBoneIdxLutPtr,   "M2FileHeader.boneIdxLutPtr");
 
     /** @brief Bone record in the header bone array (stride kBoneStride). */
     struct M2Bone
     {
-        uint8_t  _pad00[kOffBoneFlags];
+        int32_t  keyBoneId;        // kOffBoneKeyId (canonical slot id; negative = no key bone)
         uint32_t flags;            // kOffBoneFlags
         int16_t  parent;           // kOffBoneParent (0xFFFF = root)
-        uint8_t  _pad0a[kOffBonePivot - (kOffBoneParent + sizeof(int16_t))];
+        uint8_t  _pad0a[kOffBoneNameCrc - (kOffBoneParent + sizeof(int16_t))];
+        uint32_t nameCrc;          // kOffBoneNameCrc (CRC32 of the bone name, for name-based remap)
+        uint8_t  _pad10[kOffBonePivot - (kOffBoneNameCrc + sizeof(uint32_t))];
         float    pivot[3];         // kOffBonePivot (bone origin in bind space)
     };
-    static_assert(offsetof(M2Bone, flags)  == kOffBoneFlags,  "M2Bone.flags");
-    static_assert(offsetof(M2Bone, parent) == kOffBoneParent, "M2Bone.parent");
-    static_assert(offsetof(M2Bone, pivot)  == kOffBonePivot,  "M2Bone.pivot");
+    static_assert(offsetof(M2Bone, keyBoneId) == kOffBoneKeyId,  "M2Bone.keyBoneId");
+    static_assert(offsetof(M2Bone, flags)     == kOffBoneFlags,  "M2Bone.flags");
+    static_assert(offsetof(M2Bone, parent)    == kOffBoneParent, "M2Bone.parent");
+    static_assert(offsetof(M2Bone, nameCrc)   == kOffBoneNameCrc,"M2Bone.nameCrc");
+    static_assert(offsetof(M2Bone, pivot)     == kOffBonePivot,  "M2Bone.pivot");
 
     /** @brief Track object read by the evaluators: the timestamp and value sub-arrays (count + ptr each). */
     struct M2Track
@@ -281,6 +369,27 @@ namespace wxl::offsets::game::m2
     };
     static_assert(offsetof(RibbonEmitter, layerCount) == kOffRibbonLayerCount,   "RibbonEmitter.layerCount");
     static_assert(offsetof(RibbonEmitter, texHandles) == kOffRibbonTexHandlePtr, "RibbonEmitter.texHandles");
+
+    /** @brief Character model object: race/gender ids and the root scene node pointer. */
+    struct CharModelObject
+    {
+        uint8_t  _pad00[kOffCmoRace];
+        uint32_t raceId;           // kOffCmoRace
+        uint32_t genderId;         // kOffCmoGender (0 = male, 1 = female)
+        uint8_t  _pad20[kOffCmoSceneNode - (kOffCmoGender + sizeof(uint32_t))];
+        void*    sceneNode;        // kOffCmoSceneNode -> SceneNode
+    };
+    static_assert(offsetof(CharModelObject, raceId)    == kOffCmoRace,      "CharModelObject.raceId");
+    static_assert(offsetof(CharModelObject, genderId)  == kOffCmoGender,    "CharModelObject.genderId");
+    static_assert(offsetof(CharModelObject, sceneNode) == kOffCmoSceneNode, "CharModelObject.sceneNode");
+
+    /** @brief Scene node: the CharModelObject that owns this node. */
+    struct SceneNode
+    {
+        uint8_t  _pad00[kOffSceneNodeOwner];
+        void*    owner;            // kOffSceneNodeOwner -> CharModelObject
+    };
+    static_assert(offsetof(SceneNode, owner) == kOffSceneNodeOwner, "SceneNode.owner");
 #pragma pack(pop)
 
     // --- signatures ---
@@ -302,4 +411,33 @@ namespace wxl::offsets::game::m2
     using M2_TexResolveFn = void*(__cdecl*)(void* handle, int a, int b);
     // Sampler bind: native this-in-ECX.
     using M2_SamplerBindFn = void(__fastcall*)(void* device, void* edx, uint32_t selector, void* tex);
+
+    // --- attachment / resource signatures ---
+    // GetRenderCtx(cmo, edx, keyBuf, 0): ret 8 (2 stack args: keyBuf + trailing zero).
+    using M2_GetRenderCtxFn     = void*(__fastcall*)(void* cmo, void* edx, void* keyBuf, uint32_t zero);
+    // AttachToScene(renderCtx, edx, subObj, slot, 0, 0): ret 16 (4 stack args: subObj, slot, 0, 0).
+    using M2_AttachToSceneFn    = void (__fastcall*)(void* renderCtx, void* edx, void* subObj, uint32_t slot, uint32_t zero1, uint32_t zero2);
+    // DetachSlot(subObj, edx, slot): detaches the M2 from a scene slot, releasing its render ctx.
+    using M2_DetachSlotFn       = void (__fastcall*)(void* subObj, void* edx, uint32_t slot);
+    // ReleaseRenderCtx(renderCtx, edx): releases a render context.
+    using M2_ReleaseRenderCtxFn = void (__fastcall*)(void* renderCtx, void* edx);
+    // BindTexSlot(renderCtx, edx, key, modelPtr): ret 8 (key=2, then modelPtr on stack).
+    using M2_BindTexSlotFn      = void (__fastcall*)(void* renderCtx, void* edx, uint32_t key, void* modelPtr);
+    // LoadResource(path, flags, loaderPtr, 0): __cdecl; kResourceLoaderBase passed as raw literal value.
+    using M2_LoadResourceFn     = void*(__cdecl*)(const char* path, uint32_t flags, void* loaderPtr, uint32_t zero);
+    // ReleaseResource(resource): releases a resource handle returned by LoadResource.
+    using M2_ReleaseResourceFn  = void (__cdecl*)(void* resource);
+
+    // --- per-frame / slot hook signatures ---
+    // PerFrameUpdate(renderCtx, edx): per-render-ctx per-frame scene-graph update.
+    using M2_PerFrameUpdateFn   = void (__fastcall*)(void* renderCtx, void* edx);
+    // BuildBonePalette(instance, edx, sa1, sa2, sa3, sa4, sa5): fills the instance bone palette
+    // from the current animation pose. fastcall, 5 stack args, ret 0x14. Hook POST-order to
+    // override the engine's fill (e.g. CharSweep for collection M2s attached to a character).
+    using M2_BuildBonePaletteFn = void (__fastcall*)(void* renderCtx, void* edx,
+        void* sa1, void* sa2, void* sa3, uint32_t sa4, uint32_t sa5);
+    // SlotDispatch(cmo, edx, modelSlot, itemDataPtr, postFlag): equip-slot handler; loads the model.
+    using M2_SlotDispatchFn     = void (__fastcall*)(void* cmo, void* edx, uint32_t modelSlot, void* itemDataPtr, uint32_t postFlag);
+    // SlotClear(cmo, edx, equipSlotWow): clears a WoW equipment slot on the CMO.
+    using M2_SlotClearFn        = void (__fastcall*)(void* cmo, void* edx, uint32_t equipSlotWow);
 }

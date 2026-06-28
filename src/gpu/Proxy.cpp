@@ -164,6 +164,9 @@ extern "C" __declspec(dllexport) float WxlGetSsaaFactor()
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)
+    {
         EnsureReal();
+        LoadLibraryA("WarcraftXL.dll");
+    }
     return TRUE;
 }

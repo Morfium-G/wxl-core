@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace io  = wxl::offsets::engine::io;
 namespace ipc = wxl::runtime::ipc;
@@ -81,6 +82,12 @@ namespace
     uint32_t g_served = 0; // files served from the host
     uint32_t g_missed = 0; // host connected but file not served (read natively)
     uint32_t g_opens  = 0; // intercept attempts
+
+    std::vector<wxl::runtime::storage::ClientProvideFn>& ClientProviders()
+    {
+        static std::vector<wxl::runtime::storage::ClientProvideFn> v;
+        return v;
+    }
 
     /**
      * @brief Tests case-insensitively whether a string ends with a suffix.
@@ -143,6 +150,27 @@ namespace
 
         if ((++g_opens % 2000) == 0)
             WLOG_INFO("Storage stats: opens=%u served=%u missed=%u", g_opens, g_served, g_missed);
+
+        // Client-side virtual providers: checked before IPC to avoid a host round-trip.
+        // A provider returns true and fills `provided` to claim the file.
+        {
+            std::vector<uint8_t> provided;
+            for (auto fn : ClientProviders())
+            {
+                if (!fn(name, provided)) continue;
+                auto* f = static_cast<HostFile*>(calloc(1, sizeof(HostFile)));
+                if (!f) break;
+                f->magic     = kHandleMagic;
+                f->size      = static_cast<uint32_t>(provided.size());
+                f->buffer    = static_cast<uint8_t*>(malloc(f->size ? f->size : 1));
+                f->fullName  = DupName(name);
+                f->shortName = f->fullName;
+                if (f->buffer && f->size) memcpy(f->buffer, provided.data(), f->size);
+                if (out) *out = f;
+                ++g_served;
+                return true;
+            }
+        }
 
         ipc::FileOpenResult r = ipc::FileOpen(name, flags);
         if (r.ok)
@@ -431,5 +459,10 @@ namespace wxl::runtime::storage
         wxl::core::hook::Install("Storage_FileSeek",  io::kFileSeek,  reinterpret_cast<void*>(&SeekDetour),  reinterpret_cast<void**>(&g_origSeek));
         wxl::core::hook::Install("Storage_FileClose", io::kFileClose, reinterpret_cast<void*>(&CloseDetour), reinterpret_cast<void**>(&g_origClose));
         WLOG_INFO("Storage: hooks installed (host %s)", ipc::IsConnected() ? "connected" : "absent");
+    }
+
+    void RegisterClientProvider(ClientProvideFn fn)
+    {
+        if (fn) ClientProviders().push_back(fn);
     }
 }

@@ -170,11 +170,109 @@ namespace wxl::game::m2
         m->fileSize = size;
     }
 
+    /**
+     * @brief Rebuilds the GPU index buffer for a model from its current rawTri (skin->indices).
+     * @param model  the model object (ECX for the thiscall).
+     *
+     * Called directly when the skin profile is already present and the GPU IB needs to be
+     * rebuilt with an updated geoset filter. Accepts small per-call leaks of internal buffers
+     * (old model+0x18c, model+0x188, [model+0x150]+0x40) as the cost of forcing a re-bake.
+     * Always resets rawTri to identity after building the IB; apply filter immediately before.
+     */
+    inline void FinalizeSkin(void* model)
+    {
+        Native<off::M2_FinalizeSkinFn>(off::kFinalizeSkin)(model);
+    }
+
+    // --- attachment / render-context bindings ---
+
+    /**
+     * @brief Returns (or allocates) the per-model render context for a CharModelObject.
+     * @param cmo     the CharModelObject this pointer.
+     * @param keyBuf  a pointer to a key buffer that identifies the render context slot.
+     * @return the render context, or null on failure.
+     */
+    inline void* GetRenderCtx(void* cmo, void* keyBuf)
+    {
+        return Native<off::M2_GetRenderCtxFn>(off::kGetRenderCtx)(cmo, nullptr, keyBuf, 0);
+    }
+
+    /**
+     * @brief Attaches a collection-M2 render context to a scene slot on the parent render context.
+     * @param renderCtx   the parent render context (from GetRenderCtx).
+     * @param subObj      the collection-M2 instance to attach.
+     * @param slot        the scene slot index to attach to.
+     * @param forceAttach when true, passes zero2=1 to sub_831630, bypassing the BoneIndicesByID
+     *                    LUT check that silently exits for attachment points not present in the
+     *                    character's LUT (e.g. point 19 used by collection M2s).
+     */
+    inline void AttachToScene(void* renderCtx, void* subObj, uint32_t slot, bool forceAttach = false)
+    {
+        Native<off::M2_AttachToSceneFn>(off::kAttachToScene)(renderCtx, nullptr, subObj, slot, 0, forceAttach ? 1u : 0u);
+    }
+
+    /**
+     * @brief Detaches the M2 bound to a scene slot, releasing its render context.
+     * @param subObj  the collection-M2 instance that owns the slot.
+     * @param slot    the scene slot index to detach.
+     */
+    inline void DetachSlot(void* subObj, uint32_t slot)
+    {
+        Native<off::M2_DetachSlotFn>(off::kDetachSlot)(subObj, nullptr, slot);
+    }
+
+    /**
+     * @brief Releases a render context obtained from GetRenderCtx.
+     * @param renderCtx  the render context to release.
+     */
+    inline void ReleaseRenderCtx(void* renderCtx)
+    {
+        Native<off::M2_ReleaseRenderCtxFn>(off::kReleaseRenderCtx)(renderCtx, nullptr);
+    }
+
+    /**
+     * @brief Binds the M2 model resource to texture slot key 2 (main texture) on a render context.
+     * @param renderCtx  the render context to bind into.
+     * @param modelPtr   the M2 resource/model pointer to bind.
+     */
+    inline void BindTexSlot(void* renderCtx, void* modelPtr)
+    {
+        Native<off::M2_BindTexSlotFn>(off::kBindTexSlot)(renderCtx, nullptr, 2, modelPtr);
+    }
+
+    /**
+     * @brief Loads a resource by virtual path through the global resource-loader object.
+     * @param path   the virtual path (e.g. "Item\\ObjectComponents\\Weapon\\AxeSmall.M2").
+     * @param flags  loader flags (0 = default synchronous load).
+     * @return the resource handle, or null on failure.
+     */
+    inline void* LoadResource(const char* path, uint32_t flags = 0)
+    {
+        return Native<off::M2_LoadResourceFn>(off::kLoadResource)(
+            path, flags, reinterpret_cast<void*>(off::kResourceLoaderBase), 0);
+    }
+
+    /**
+     * @brief Releases a resource handle returned by LoadResource.
+     * @param resource  the resource handle to release.
+     */
+    inline void ReleaseResource(void* resource)
+    {
+        Native<off::M2_ReleaseResourceFn>(off::kReleaseResource)(resource);
+    }
+
     /** @brief Adds the M2 bindings to the enumerable catalog. */
     inline void RegisterCatalog()
     {
-        Register({ "M2::ResolveTexture", off::kTexResolve,   "void*(handle)" });
-        Register({ "M2::BindSampler",    off::kSamplerBind,  "void(device, selector, tex)" });
-        Register({ "M2::PushAlphaRef",   off::kPushAlphaRef, "void(float ref)" });
+        Register({ "M2::ResolveTexture",  off::kTexResolve,       "void*(handle)" });
+        Register({ "M2::BindSampler",     off::kSamplerBind,      "void(device, selector, tex)" });
+        Register({ "M2::PushAlphaRef",    off::kPushAlphaRef,     "void(float ref)" });
+        Register({ "M2::GetRenderCtx",    off::kGetRenderCtx,     "void*(cmo, keyBuf)" });
+        Register({ "M2::AttachToScene",   off::kAttachToScene,    "void(renderCtx, subObj, slot)" });
+        Register({ "M2::DetachSlot",      off::kDetachSlot,       "void(subObj, slot)" });
+        Register({ "M2::ReleaseRenderCtx",off::kReleaseRenderCtx, "void(renderCtx)" });
+        Register({ "M2::BindTexSlot",     off::kBindTexSlot,      "void(renderCtx, modelPtr)" });
+        Register({ "M2::LoadResource",    off::kLoadResource,     "void*(path, flags)" });
+        Register({ "M2::ReleaseResource", off::kReleaseResource,  "void(resource)" });
     }
 }

@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <vector>
+
 namespace wxl::runtime::storage
 {
     /**
@@ -34,4 +36,22 @@ namespace wxl::runtime::storage
      * are harmless with no host (every open falls through). Call once at startup, before EnableAll.
      */
     void Install();
+
+    /**
+     * @brief Callback type for client-side virtual file providers.
+     * @param name  file name requested by the engine
+     * @param out   receives the file bytes when the provider claims the name
+     * @return true if this provider supplied bytes for name, false to pass through to the host
+     */
+    using ClientProvideFn = bool(*)(const char* name, std::vector<uint8_t>& out);
+
+    /**
+     * @brief Registers a client-side file provider.
+     *
+     * Providers are checked in TryServe before the host IPC round-trip. A provider that returns
+     * true claims the file; the first claimant wins. Safe to call from a global constructor
+     * (no hooking engine involved — just a function pointer stored in a list).
+     * @param fn  provider callback to register
+     */
+    void RegisterClientProvider(ClientProvideFn fn);
 }

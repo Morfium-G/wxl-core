@@ -60,4 +60,47 @@ namespace wxl::offsets::game::db2
         constexpr uintptr_t kCacheBuilder   = 0x004F3DD0; // cache builder
         constexpr uintptr_t kCacheRoot      = 0x00B6B864; // consumer cache root
     }
+
+    // -------------------------------------------------------------------------
+    // ChrRaces DBC. Compacted storage indexed by (id - minId). The ClientPrefix field at +0x18 is
+    // a 4-char race code (e.g. "Hum", "Orc") used to build model paths.
+    // -------------------------------------------------------------------------
+    namespace chrraces
+    {
+        constexpr uintptr_t kMinId          = 0x00AD3438; // i32 minimum race id in the table
+        constexpr uintptr_t kMaxId          = 0x00AD3434; // i32 maximum race id
+        constexpr uintptr_t kIdTable        = 0x00AD3448; // record* table, indexed by (id - minId)
+        constexpr size_t    kOffRecordPrefix= 0x18;       // char[4] race client prefix (e.g. "Hum")
+    }
+
+    // -------------------------------------------------------------------------
+    // ItemDisplayInfo DBC. Looked up by display_id via the funnel accessor at kLookup. The record
+    // contains model/texture names, the icon2 extension string, and the particle color id.
+    // -------------------------------------------------------------------------
+    namespace itemdisplayinfo
+    {
+        constexpr uintptr_t kStorageObject  = 0x00AD3DDC; // storage instance
+        // sub_4cfd90: thiscall(ecx=storageObj, displayId, outBuf); fills outBuf with the 256-byte
+        // record copy (field pointers point into the live DBC string block); returns non-zero if found.
+        constexpr uintptr_t kLookup         = 0x004CFD90;
+        using LookupFn = uint32_t (__fastcall*)(void* storageObj, void* edx, uint32_t displayId, void* outBuf);
+
+        // Field offsets within the resolved record pointer (byte offsets from the record base).
+        constexpr size_t kOffModel1     = 0x04; // char* primary model filename (no path, no extension)
+        constexpr size_t kOffModel2     = 0x08; // char* secondary model filename (left/right variant)
+        constexpr size_t kOffTex1       = 0x0C; // char* primary texture name
+        constexpr size_t kOffTex2       = 0x10; // char* secondary texture name
+        constexpr size_t kOffIcon2      = 0x18; // char* icon2 string (consumer-defined convention; raw pointer only)
+        constexpr size_t kOffParticleId = 0x60; // uint32 particle color id
+        constexpr size_t kRecordSize    = 256;  // byte stride between records in the storage array
+    }
+
+    // -------------------------------------------------------------------------
+    // Gender strings table. A flat array of char* pointers indexed by gender id (0 = Male, 1 = Female).
+    // Used to build gender-specific model paths (e.g. "HumanMale" vs "HumanFemale").
+    // -------------------------------------------------------------------------
+    namespace genderstrings
+    {
+        constexpr uintptr_t kTable = 0x00AC46A0; // char*[2] (index 0 = "Male", index 1 = "Female")
+    }
 }

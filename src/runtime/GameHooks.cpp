@@ -51,9 +51,14 @@ namespace
     namespace unit  = wxl::offsets::game::unit;
     namespace snd   = wxl::offsets::engine::sound;
 
-    m2::M2_InitFn              g_origM2Init       = nullptr;
-    m2::M2_FinalizeSkinFn      g_origFinalizeSkin = nullptr;
-    m2::M2_SetupBatchAlphaFn   g_origSetupAlpha   = nullptr;
+    m2::M2_InitFn              g_origM2Init            = nullptr;
+    m2::M2_FinalizeSkinFn      g_origFinalizeSkin      = nullptr;
+    m2::M2_BuildBatchMaterialFn g_origBuildBatchMaterial = nullptr;
+    m2::M2_SetupBatchAlphaFn   g_origSetupAlpha    = nullptr;
+    m2::M2_SlotDispatchFn      g_origSlotDispatch  = nullptr;
+    m2::M2_SlotClearFn         g_origSlotClear     = nullptr;
+    m2::M2_PerFrameUpdateFn    g_origM2PerFrame    = nullptr;
+    m2::M2_BuildBonePaletteFn  g_origBuildBonePalette = nullptr;
     dd::SpawnFromMDDFFn        g_origDoodadSpawn  = nullptr;
     wmo::Wmo_SpawnFromModfFn   g_origWmoSpawn     = nullptr;
     gxoff::TextureUpdateFn       g_origTexUpdate    = nullptr;
@@ -98,6 +103,32 @@ namespace
         ev::M2SkinFinalizeArgs a{ model };
         ev::Emit(ev::Event::OnM2SkinFinalize, &a);
         g_origFinalizeSkin(model);
+    }
+
+    /**
+     * @brief Guards the per-batch material-key builder against unimplemented shader types.
+     *
+     * sub_836C90 (kBuildBatchMaterial) reads M2Batch::shaderId (batch+2) and uses bits 0-14 as a
+     * switch index when bit 0x8000 is set. The switch only handles values 0-3; for higher values it
+     * falls through with EBX=0 and crashes at 0x836D11 (mov cl, [eax] with eax=0).
+     * Modern collection M2s can have shaderId values > 3; returning nullptr for those is safe because
+     * kFinalizeSkin only stores the result in the model+0x188 array, which the IB build path does not
+     * dereference directly.
+     * @param model    model object (ECX thiscall this pointer).
+     * @param edx      unused register slot (thiscall via fastcall trampoline).
+     * @param batchPtr pointer to the M2Batch entry from skin->batches.
+     * @return the material-key object, or nullptr for unimplemented shader types.
+     */
+    void* __fastcall hkBuildBatchMaterial(void* model, void* /*edx*/, void* batchPtr)
+    {
+        if (batchPtr)
+        {
+            uint16_t shaderId = *reinterpret_cast<uint16_t*>(
+                static_cast<uint8_t*>(batchPtr) + 2);
+            if ((shaderId & 0x8000u) && (shaderId & 0x7FFFu) > 3u)
+                return nullptr;
+        }
+        return g_origBuildBatchMaterial(model, batchPtr);
     }
 
     /**
@@ -556,6 +587,82 @@ namespace
                           *reinterpret_cast<uint32_t*>(frame::kFrameTimeMs) };
         ev::Emit(ev::Event::OnUpdate, &a);
     }
+
+    /**
+     * @brief Detours the CharModel equip-slot handler, emitting OnItemSlotChange then calling the native.
+     *
+     * Fires when an item is equipped to an internal model slot (not the WoW equipment slot index).
+     * modelSlot maps to an equipment category (head, chest, weapon, etc.). itemDataPtr points to
+     * the item data block that carries the display_id used to look up ItemDisplayInfo.
+     * @param cmo          CharModelObject this pointer.
+     * @param edx          thiscall dummy.
+     * @param modelSlot    internal model slot index.
+     * @param itemDataPtr  item data block pointer (contains display_id).
+     * @param postFlag     native post-dispatch flag.
+     */
+    void __fastcall hkSlotDispatch(void* cmo, void* edx, uint32_t modelSlot, void* itemDataPtr, uint32_t postFlag)
+    {
+        // Native must run first: for head (slot 11), sub_4eefa0 checks if slot 11 is occupied and
+        // returns NULL if so — which would skip geoset writes. Let native populate slot 11 first,
+        // then subscribers receive the event with the slot already in its post-dispatch state.
+        g_origSlotDispatch(cmo, edx, modelSlot, itemDataPtr, postFlag);
+        ev::ItemSlotChangeArgs a{ cmo, modelSlot, itemDataPtr };
+        ev::Emit(ev::Event::OnItemSlotChange, &a);
+    }
+
+    /**
+     * @brief Detours the CharModel equip-slot clear, emitting OnItemSlotClear then calling the native.
+     *
+     * Fires when a WoW equipment slot is cleared on a CharModelObject, detaching any M2 that was
+     * loaded for that slot and releasing its render context.
+     * @param cmo           CharModelObject this pointer.
+     * @param edx           thiscall dummy.
+     * @param equipSlotWow  WoW equipment slot index (EQUIPMENT_SLOT_* constants, 0-18).
+     */
+    void __fastcall hkSlotClear(void* cmo, void* edx, uint32_t equipSlotWow)
+    {
+        ev::ItemSlotClearArgs a{ cmo, equipSlotWow };
+        ev::Emit(ev::Event::OnItemSlotClear, &a);
+        g_origSlotClear(cmo, edx, equipSlotWow);
+    }
+
+    /**
+     * @brief Detours the per-render-ctx M2 scene-graph update, emitting OnM2PerFrameUpdate per visible M2.
+     *
+     * Fires recursively through the scene graph once per visible M2 render context per frame — this
+     * is the correct hook point for per-frame bone-matrix copy and geoset (index buffer) filtering,
+     * both of which must run in step with the render context rather than once per EndScene.
+     * @param renderCtx  the M2 render context being updated.
+     * @param edx        thiscall dummy.
+     */
+    void __fastcall hkM2PerFrameUpdate(void* renderCtx, void* edx)
+    {
+        g_origM2PerFrame(renderCtx, edx);
+        ev::M2PerFrameUpdateArgs a{ renderCtx };
+        ev::Emit(ev::Event::OnM2PerFrameUpdate, &a);
+    }
+
+    /**
+     * @brief Detours bone-palette build, emitting OnBuildBonePalette after the engine fills the buffer.
+     *
+     * Called from two sites per collection M2 per frame:
+     *   (a) sub_8309C0 (kUpdateAttachedModels), inside kM2PerFrameUpdate of the parent character.
+     *   (b) The outer scene-traversal loop (0x821B4E), which runs AFTER the parent's PerFrameUpdate.
+     *
+     * Site (b) overwrites any bone-palette modifications that OnM2PerFrameUpdate subscribers made,
+     * reverting the collection M2 to its bind pose every frame. By hooking POST-order here,
+     * subscribers can re-apply their modifications immediately after the engine's fill — guaranteed
+     * to be the last write before the GPU upload regardless of scene-list ordering.
+     *
+     * Calling convention: fastcall, ecx = renderCtx, 5 stack args, ret 0x14 (callee-cleanup).
+     */
+    void __fastcall hkBuildBonePalette(void* renderCtx, void* edx,
+        void* sa1, void* sa2, void* sa3, uint32_t sa4, uint32_t sa5)
+    {
+        g_origBuildBonePalette(renderCtx, edx, sa1, sa2, sa3, sa4, sa5);
+        ev::BuildBonePaletteArgs a{ renderCtx };
+        ev::Emit(ev::Event::OnBuildBonePalette, &a);
+    }
 }
 
 namespace wxl::runtime::game
@@ -571,6 +678,9 @@ namespace wxl::runtime::game
         wxl::core::hook::Install("M2FinalizeSkin", m2::kFinalizeSkin,
                                  reinterpret_cast<void*>(&hkFinalizeSkin),
                                  reinterpret_cast<void**>(&g_origFinalizeSkin));
+        wxl::core::hook::Install("M2BuildBatchMaterial", m2::kBuildBatchMaterial,
+                                 reinterpret_cast<void*>(&hkBuildBatchMaterial),
+                                 reinterpret_cast<void**>(&g_origBuildBatchMaterial));
         wxl::core::hook::Install("M2SetupBatchAlpha", m2::kSetupBatchAlpha,
                                  reinterpret_cast<void*>(&hkSetupBatchAlpha),
                                  reinterpret_cast<void**>(&g_origSetupAlpha));
@@ -620,6 +730,18 @@ namespace wxl::runtime::game
         wxl::core::hook::Install("PlaySound", snd::kPlaySound,
                                  reinterpret_cast<void*>(&hkPlaySound),
                                  reinterpret_cast<void**>(&g_origPlaySound));
+        wxl::core::hook::Install("CharModelSlotDispatch", m2::kCharModelSlotDispatch,
+                                 reinterpret_cast<void*>(&hkSlotDispatch),
+                                 reinterpret_cast<void**>(&g_origSlotDispatch));
+        wxl::core::hook::Install("CharModelSlotClear", m2::kCharModelSlotClear,
+                                 reinterpret_cast<void*>(&hkSlotClear),
+                                 reinterpret_cast<void**>(&g_origSlotClear));
+        wxl::core::hook::Install("M2PerFrameUpdate", m2::kM2PerFrameUpdate,
+                                 reinterpret_cast<void*>(&hkM2PerFrameUpdate),
+                                 reinterpret_cast<void**>(&g_origM2PerFrame));
+        wxl::core::hook::Install("M2BuildBonePalette", m2::kBuildBonePalette,
+                                 reinterpret_cast<void*>(&hkBuildBonePalette),
+                                 reinterpret_cast<void**>(&g_origBuildBonePalette));
 
         // Liquid-row null guard: this one liquid consumer dereferences the LiquidType row flag without the
         // null check the others have, so an unknown liquid id (from any served source) faults. Skip the
@@ -629,6 +751,6 @@ namespace wxl::runtime::game
             wxl::core::mem::Patch(reinterpret_cast<void*>(adt::kLiquidRowFlagTest), guard, sizeof guard);
         }
 
-        WLOG_INFO("game: hooks installed (M2Init, M2FinalizeSkin, M2SetupBatchAlpha, DoodadSpawn, TextureUpdate, TextureCreate, ChunkBuild, WmoRootComplete, WmoGroupParse, CWorldEnter, FramePump, ObjectUpdate, ObjectDestroy, TargetSet, PlaySound)");
+        WLOG_INFO("game: hooks installed (M2Init, M2FinalizeSkin, M2SetupBatchAlpha, DoodadSpawn, TextureUpdate, TextureCreate, ChunkBuild, WmoRootComplete, WmoGroupParse, CWorldEnter, FramePump, ObjectUpdate, ObjectDestroy, TargetSet, PlaySound, CharModelSlotDispatch, CharModelSlotClear, M2PerFrameUpdate, M2BuildBonePalette)");
     }
 }
