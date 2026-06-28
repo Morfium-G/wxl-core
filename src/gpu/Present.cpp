@@ -16,6 +16,7 @@
 
 #include "gpu/Present.hpp"
 
+#include "gpu/Capture.hpp"
 #include "gpu/Device.hpp"
 
 #include <d3d12.h>
@@ -65,12 +66,13 @@ namespace
     static const char* k_blitHLSL =
         "Texture2D    src : register(t0);\n"
         "SamplerState smp : register(s0);\n"
+        "cbuffer C : register(b0) { float2 uvScale; }\n"   // sample only [0,uvScale] (native region under SSAA)
         "void vs(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0) {\n"
         "  uv = float2((id << 1) & 2, id & 2);\n"
         "  pos = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);\n"
         "}\n"
         "float4 ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {\n"
-        "  return float4(src.Sample(smp, uv).rgb, 1);\n"
+        "  return float4(src.Sample(smp, uv * uvScale).rgb, 1);\n"
         "}\n";
 
     /**
@@ -96,18 +98,22 @@ namespace
         D3D12_DESCRIPTOR_RANGE range = {};
         range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         range.NumDescriptors = 1;
-        D3D12_ROOT_PARAMETER param = {};
-        param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        param.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-        param.DescriptorTable.NumDescriptorRanges = 1;
-        param.DescriptorTable.pDescriptorRanges = &range;
+        D3D12_ROOT_PARAMETER params[2] = {};
+        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        params[0].DescriptorTable.NumDescriptorRanges = 1;
+        params[0].DescriptorTable.pDescriptorRanges = &range;
+        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;   // uvScale at b0
+        params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        params[1].Constants.ShaderRegister = 0;
+        params[1].Constants.Num32BitValues = 2;
         D3D12_STATIC_SAMPLER_DESC samp = {};
         samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         samp.MaxLOD = D3D12_FLOAT32_MAX;
         D3D12_ROOT_SIGNATURE_DESC rs = {};
-        rs.NumParameters = 1; rs.pParameters = &param;
+        rs.NumParameters = 2; rs.pParameters = params;
         rs.NumStaticSamplers = 1; rs.pStaticSamplers = &samp;
         rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
