@@ -202,8 +202,12 @@ namespace
     SetDSFn g_origSetDS = nullptr;
     void*   g_filterDevice = nullptr;                  // device whose vtable currently carries the filters
 
+    // The world depth is an INTZ texture (a depth-stencil that is ALSO shader-readable) so depth-using
+    // post-process effects (SSAO) can sample it after the world pass. INTZ is single-sample only.
+    const D3DFORMAT    kFmtINTZ = static_cast<D3DFORMAT>(MAKEFOURCC('I', 'N', 'T', 'Z'));
     IDirect3DSurface9* g_ssaaColor = nullptr;          // factor-sized world color render target
-    IDirect3DSurface9* g_ssaaDepth = nullptr;          // factor-sized world depth-stencil
+    IDirect3DTexture9* g_ssaaDepthTex = nullptr;       // factor-sized INTZ depth texture (sampleable)
+    IDirect3DSurface9* g_ssaaDepth = nullptr;          // its level-0 surface, bound as the world depth-stencil
     void*              g_ssaaDevice = nullptr;         // device the offscreen surfaces belong to
     UINT g_ssaaNativeW = 0, g_ssaaNativeH = 0;         // native backbuffer size the redirect matches
     UINT g_ssaa2xW = 0, g_ssaa2xH = 0;                 // offscreen (supersampled) size
@@ -227,6 +231,9 @@ namespace
         if (g_ssaaRedirect && index == 0 && g_ssaaColor && SsaaIsNativeSize(static_cast<IDirect3DSurface9*>(surface)))
         {
             use = g_ssaaColor;
+            // Bind the 2x depth BEFORE the 2x color: D3D9 requires the depth-stencil to be >= the render
+            // target, so a transient 2x-RT-with-1x-depth (if the engine set RT before depth) would fault.
+            if (g_ssaaDepth) g_origSetDS(dev, g_ssaaDepth);
             if (uint8_t* base = GxBase())
             {
                 *reinterpret_cast<float*>(base + off::kCurWindowWidth)  = (float)g_ssaa2xW;
@@ -249,14 +256,15 @@ namespace
     /** @brief Releases the offscreen world surfaces. */
     void SsaaReleaseTargets()
     {
-        if (g_ssaaColor) { g_ssaaColor->Release(); g_ssaaColor = nullptr; }
-        if (g_ssaaDepth) { g_ssaaDepth->Release(); g_ssaaDepth = nullptr; }
+        if (g_ssaaColor)    { g_ssaaColor->Release();    g_ssaaColor = nullptr; }
+        if (g_ssaaDepth)    { g_ssaaDepth->Release();    g_ssaaDepth = nullptr; }
+        if (g_ssaaDepthTex) { g_ssaaDepthTex->Release(); g_ssaaDepthTex = nullptr; }
         g_ssaaNativeW = g_ssaaNativeH = g_ssaa2xW = g_ssaa2xH = 0;
         g_ssaaDevice = nullptr;
     }
 
-    /** @brief Creates (or recreates on device/size change) the offscreen world surfaces. */
-    bool SsaaEnsureTargets(IDirect3DDevice9* dev, UINT nativeW, UINT nativeH, float factor, D3DFORMAT colorFmt, D3DFORMAT depthFmt)
+    /** @brief Creates (or recreates on device/size change) the offscreen world color RT + INTZ depth. */
+    bool SsaaEnsureTargets(IDirect3DDevice9* dev, UINT nativeW, UINT nativeH, float factor, D3DFORMAT colorFmt)
     {
         if (g_ssaaColor && g_ssaaDepth && g_ssaaDevice == dev && g_ssaaNativeW == nativeW && g_ssaaNativeH == nativeH)
             return true;
@@ -269,16 +277,23 @@ namespace
             SsaaReleaseTargets();
             return false;
         }
-        if (FAILED(dev->CreateDepthStencilSurface(w, h, depthFmt, D3DMULTISAMPLE_NONE, 0, FALSE, &g_ssaaDepth, nullptr)))
+        // INTZ depth texture: a depth-stencil the world writes AND a shader-readable texture the AO samples.
+        if (FAILED(dev->CreateTexture(w, h, 1, D3DUSAGE_DEPTHSTENCIL, kFmtINTZ, D3DPOOL_DEFAULT, &g_ssaaDepthTex, nullptr)) || !g_ssaaDepthTex)
         {
-            WLOG_WARN("ssaa: CreateDepthStencilSurface %ux%u fmt=%d failed", w, h, (int)depthFmt);
+            WLOG_WARN("ssaa: CreateTexture INTZ %ux%u failed", w, h);
+            SsaaReleaseTargets();
+            return false;
+        }
+        if (FAILED(g_ssaaDepthTex->GetSurfaceLevel(0, &g_ssaaDepth)) || !g_ssaaDepth)
+        {
+            WLOG_WARN("ssaa: INTZ GetSurfaceLevel failed");
             SsaaReleaseTargets();
             return false;
         }
         g_ssaaDevice = dev;
         g_ssaaNativeW = nativeW; g_ssaaNativeH = nativeH;
         g_ssaa2xW = w; g_ssaa2xH = h;
-        WLOG_INFO("ssaa: offscreen world target %ux%u (native %ux%u) color=%d depth=%d", w, h, nativeW, nativeH, (int)colorFmt, (int)depthFmt);
+        WLOG_INFO("ssaa: offscreen world target %ux%u (native %ux%u) color=%d depth=INTZ", w, h, nativeW, nativeH, (int)colorFmt);
         return true;
     }
 
@@ -304,13 +319,7 @@ namespace
         bb->GetDesc(&cd);
         bb->Release();
 
-        D3DFORMAT depthFmt = D3DFMT_D24S8;
-        if (IDirect3DSurface9* nd = *reinterpret_cast<IDirect3DSurface9**>(base + off::kDepthSurfaceField))
-        {
-            D3DSURFACE_DESC dd{};
-            if (SUCCEEDED(nd->GetDesc(&dd))) depthFmt = dd.Format;
-        }
-        g_ssaaRedirect = SsaaEnsureTargets(dev, cd.Width, cd.Height, WxlGetSsaaFactor(), cd.Format, depthFmt);
+        g_ssaaRedirect = SsaaEnsureTargets(dev, cd.Width, cd.Height, WxlGetSsaaFactor(), cd.Format);
     }
 
     /**
@@ -358,9 +367,11 @@ namespace
 
         // The OnWorldRenderEnd subscriber downsamples the offscreen world surface into the native backbuffer
         // through On12 (D3D9 StretchRect to the backbuffer is rejected), then runs the post-process effects.
+        // depthSource = the readable INTZ world depth for depth-using effects (SSAO).
         ev::WorldRenderEndArgs a{ gx::RawDevice(),
                                   ssaa ? static_cast<void*>(g_ssaaColor) : nullptr,
-                                  ssaa ? WxlGetSsaaFactor() : 1.0f };
+                                  ssaa ? WxlGetSsaaFactor() : 1.0f,
+                                  ssaa ? static_cast<void*>(g_ssaaDepth) : nullptr };
         ev::Emit(ev::Event::OnWorldRenderEnd, &a);
     }
 
