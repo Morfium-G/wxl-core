@@ -348,6 +348,10 @@ namespace wxl::gpu::present
         g_list->SetDescriptorHeaps(1, heaps);
         g_list->SetGraphicsRootSignature(g_rootSig);
         g_list->SetGraphicsRootDescriptorTable(0, srvGpu);
+        // Sample only the native [0, 1/factor] region of the (supersampled) backbuffer; 1.0 when SSAA is off.
+        const float factor = wxl::gpu::capture::SsaaFactor();
+        const float uvScale[2] = { factor > 1.01f ? 1.0f / factor : 1.0f, factor > 1.01f ? 1.0f / factor : 1.0f };
+        g_list->SetGraphicsRoot32BitConstants(1, 2, uvScale, 0);
         g_list->SetPipelineState(g_pso);
         g_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         D3D12_VIEWPORT vp = { 0, 0, (float)dw, (float)dh, 0, 1 };
