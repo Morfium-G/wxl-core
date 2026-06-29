@@ -266,12 +266,18 @@ namespace
      *
      * width=x2-x and height=y2-y cover both full-surface (x=y=0) and sub-rect uploads.
      *
-     * The mip source the upload reads is a process-wide singleton pointer table (kMipTablePtr) that a
-     * build fills with raw aliases into its transient IO buffer; back-to-back doodad/texture loads let a
-     * later build overwrite that table and free its buffer while this upload still reads it, an
-     * access-violation use-after-free (0x40cb6a). Clearing kMipTableValid here routes the upload through
-     * the engine's own safety net: with the flag down, the source callback re-reads the .blp into a fresh
-     * buffer instead of trusting the singleton aliases, so the upload never reads a freed page.
+     * The mip source the upload reads is a process-wide singleton (kMipTablePtr is a pointer whose
+     * buffer holds the per-mip source pointers; kMipTableValid gates the read). A build fills it with
+     * raw aliases into its transient IO buffer, then uploads. Two ways that singleton turns into an
+     * access-violation use-after-free (0x40cb6a), both fixed here without ever clearing kMipTableValid
+     * (which would route atlas icons through a source callback that has no self-heal and blank them):
+     *  - a NESTED build run while this upload is mid-copy overwrites the table and frees its buffer; the
+     *    async-drain serializer snapshots and restores the table around the nested build it runs
+     *    (adrain::DrainAwaitedOnly), so the outer upload keeps reading its own live aliases.
+     *  - a TRUNCATED mip chain (common in custom-map BLPs) only fills the low slots, so the dimension-
+     *    driven upload would read a prior build's freed alias left in a high slot. Clearing the table
+     *    after each upload leaves the next build's unfilled slots at 0, which the upload's source-not-null
+     *    blit guard skips. Done after the original consumed the table, so the live upload is unaffected.
      * @param tex   texture being uploaded.
      * @param x     upload rect left.
      * @param y     upload rect top.
@@ -283,8 +289,9 @@ namespace
     {
         ev::TextureUploadArgs a{ tex, static_cast<uint32_t>(x2 - x), static_cast<uint32_t>(y2 - y) };
         ev::Emit(ev::Event::OnTextureUpload, &a);
-        *reinterpret_cast<uint32_t*>(gxoff::kMipTableValid) = 0;
         g_origTexUpdate(tex, x, y, x2, y2, flag);
+        if (auto* tbl = *reinterpret_cast<uint32_t**>(gxoff::kMipTablePtr))
+            std::memset(tbl, 0, gxoff::kMipTableSlots * sizeof(uint32_t));
     }
 
     // Per-thread async-drain recursion depth. A texture build force-waits nested reads, which re-enter the
@@ -352,6 +359,41 @@ namespace
             }
         }
 
+        // The mip-source singleton an upload reads while we run a nested completion. kMipTablePtr is a
+        // pointer whose buffer holds the per-mip source pointers (read as ((u32*)ptr)[mip]); kMipTableValid
+        // gates that read. The awaited completion is itself a texture build that refills both with its own
+        // aliases and frees its IO buffer, so the outer build whose GxTexUpdate force-waited us would resume
+        // reading a clobbered, freed table (0x40cb6a). Snapshot the outer view, run the nested build, put it
+        // back: the outer copy then reads its own pointers into its own still-live buffer. The real mip count
+        // is <= 13; 16 dwords is a safe upper bound, and the table buffer is the 1024-DXT scratch so the
+        // fixed-size copy is always in bounds.
+        struct MipTableSnapshot
+        {
+            uint32_t ptr;
+            uint32_t valid;
+            uint32_t table[16];
+            bool     hasTable;
+        };
+
+        inline MipTableSnapshot SnapshotMipTable()
+        {
+            MipTableSnapshot s{};
+            s.ptr      = Rd(gxoff::kMipTablePtr);
+            s.valid    = Rd(gxoff::kMipTableValid);
+            s.hasTable = (s.ptr != 0);
+            if (s.hasTable)
+                std::memcpy(s.table, reinterpret_cast<const void*>(s.ptr), sizeof(s.table));
+            return s;
+        }
+
+        inline void RestoreMipTable(const MipTableSnapshot& s)
+        {
+            Wr(gxoff::kMipTablePtr, s.ptr);
+            if (s.hasTable)
+                std::memcpy(reinterpret_cast<void*>(s.ptr), s.table, sizeof(s.table));
+            Wr(gxoff::kMipTableValid, s.valid);
+        }
+
         // Process ONLY the awaited node; leave every other completion queued for the outer pump.
         int DrainAwaitedOnly()
         {
@@ -369,7 +411,13 @@ namespace
             if (Rd(kAwaitedObj) == target) Wr(kAwaitedObj, 0);
             WrB(target + 0x21, 1);
             Unlock(); // the engine releases the lock before every completion call
+
+            // Save the outer build's mip-source view across the nested build this completion runs, then
+            // restore it so the force-waiting outer GxTexUpdate resumes reading its own live aliases.
+            const MipTableSnapshot snap = SnapshotMipTable();
             reinterpret_cast<void(__cdecl*)(uint32_t)>(Rd(target + 0x10))(Rd(target + 0x0c));
+            RestoreMipTable(snap);
+
             Wr(kPendingCount, Rd(kPendingCount) - 1);
             return 1;
         }

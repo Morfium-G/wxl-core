@@ -133,6 +133,13 @@ namespace wxl::offsets::engine::gx
     // it under the outer build. kMipTablePtr holds the buffer pointer; the table is at *kMipTablePtr.
     constexpr uintptr_t kMipTablePtr   = 0x00B49C90;
     constexpr uintptr_t kMipTableValid = 0x00B49C94; // nonzero while the table is live (gates a reload)
+    constexpr size_t    kMipTableSlots = 16;         // upper bound on mip levels (real count <= 13)
+    // The table is filled per build (CBLPFile_LockChain2 writes kMipTablePtr[mip] = alias) only for mip
+    // levels with a nonzero size, so a truncated mip chain (common in custom-map BLPs) under-fills it and
+    // leaves a previous build's freed alias in a high slot. The upload (CGxDeviceD3d__ITexUpload) walks mips
+    // by header dimensions and would read that stale slot and fault (the 0x40cb6a UAF on a cold custom-map
+    // login). Its per-mip blit is guarded by "source != 0", so clearing the table after each upload makes an
+    // under-filled build's high slots read 0 and get skipped.
 
     // Per-frame liquid render pass loop (this-in-ECX). Brackets every visible liquid instance of one pass;
     // both passes route through it (passType 0 main, 1 secondary). Runs late in the frame, after the liquid
