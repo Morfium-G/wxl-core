@@ -53,8 +53,9 @@ namespace wxl::offsets::game::unit
     using TargetSetFn = int(__cdecl*)(void* scriptState);
 
     // --- object field offsets ---
-    constexpr size_t kUnitModelField   = 0xB4; // unit object -> body model
-    constexpr size_t kModelParentField = 0x48; // model -> parent model (0 = root)
+    constexpr size_t kUnitModelField    = 0xB4;  // unit object -> body model
+    constexpr size_t kModelParentField  = 0x48;  // model -> parent model (0 = root)
+    constexpr size_t kUnitPositionField = 0x798; // unit object -> world position (3 floats x, y, z)
 
     // --- type masks ---
     constexpr uint32_t kTypeMaskUnit   = 0x08;
@@ -71,13 +72,16 @@ namespace wxl::offsets::game::unit
     // with every member offset checked against a constant at compile time (a wrong padding fails the build).
     // Only RE'd fields are named; the gaps are explicit padding. Pointers are 4 bytes on the 32-bit client.
 #pragma pack(push, 1)
-    /** @brief Unit / world object: the body-model slot. */
+    /** @brief Unit / world object: the body-model slot and the world position. */
     struct UnitObject
     {
         uint8_t  _pad00[kUnitModelField];
         void*    model;            // kUnitModelField -> body model
+        uint8_t  _pad01[kUnitPositionField - kUnitModelField - sizeof(void*)];
+        float    position[3];      // kUnitPositionField -> world position x, y, z
     };
     static_assert(offsetof(UnitObject, model) == kUnitModelField, "UnitObject.model");
+    static_assert(offsetof(UnitObject, position) == kUnitPositionField, "UnitObject.position");
 
     /** @brief Model object: the parent slot in the attachment chain. */
     struct ModelObject

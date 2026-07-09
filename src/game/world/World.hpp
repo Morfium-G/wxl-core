@@ -58,6 +58,17 @@ namespace wxl::game::world
     inline void* GetObject(unsigned long long guid, unsigned typeMask)
     { return Native<off::GetObjectFn>(off::kGetObjectByGuid)(guid, typeMask, "wxl", 0); }
 
+    /**
+     * @brief Reads a unit's world position.
+     * @param unit  Unit object from GetObject.
+     * @param out   Receives x, y, z in out[0..2].
+     */
+    inline void UnitPosition(void* unit, float out[3])
+    {
+        const float* p = static_cast<off::UnitObject*>(unit)->position;
+        out[0] = p[0]; out[1] = p[1]; out[2] = p[2];
+    }
+
     constexpr unsigned kTypeMaskUnit   = off::kTypeMaskUnit;
     constexpr unsigned kTypeMaskPlayer = off::kTypeMaskPlayer;
 }
