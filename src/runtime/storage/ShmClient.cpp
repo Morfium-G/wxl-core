@@ -33,15 +33,20 @@ using namespace wxl::ipc;
 namespace
 {
     // --- connection state (set once at Connect, read-only afterwards) ---
+    // Arrays are sized to the safety bound kMaxChannels; only the first g_channelCount slots (the value
+    // the host actually created, learned from channel 0's header at connect) are ever populated or
+    // scanned. The channel count is the host's decision, not guessed independently here -- see
+    // Protocol.hpp's kMinChannels/kMaxChannels comment.
     std::mutex g_connectMutex;          // guards the one-time connect/disconnect of the shared objects
     std::atomic<bool> g_connected{ false };
     HANDLE g_shm = nullptr;
     uint8_t* g_base = nullptr;
-    HANDLE g_reqEvent[kChannels]  = {};
-    HANDLE g_respEvent[kChannels] = {};
+    uint32_t g_channelCount = 0;
+    HANDLE g_reqEvent[kMaxChannels]  = {};
+    HANDLE g_respEvent[kMaxChannels] = {};
 
     // --- channel pool: a free channel is acquired per request, then released ---
-    std::atomic<bool> g_channelBusy[kChannels] = {}; // false = free
+    std::atomic<bool> g_channelBusy[kMaxChannels] = {}; // false = free
 
     // Cold modern transforms can take several seconds before the host cache is warm. Timing out short here
     // makes the client fall back to native archives, which cannot see host-owned loose patch dirs -- so a
@@ -71,11 +76,12 @@ namespace
     void DisconnectLocked()
     {
         g_connected.store(false);
-        for (uint32_t i = 0; i < kChannels; ++i)
+        for (uint32_t i = 0; i < kMaxChannels; ++i)
         {
             if (g_reqEvent[i])  { CloseHandle(g_reqEvent[i]);  g_reqEvent[i]  = nullptr; }
             if (g_respEvent[i]) { CloseHandle(g_respEvent[i]); g_respEvent[i] = nullptr; }
         }
+        g_channelCount = 0;
         if (g_base) { UnmapViewOfFile(g_base); g_base = nullptr; }
         if (g_shm)  { CloseHandle(g_shm); g_shm = nullptr; }
     }
@@ -92,19 +98,25 @@ namespace
 
         g_shm = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, kShmName);
         if (!g_shm) return false;
-        g_base = static_cast<uint8_t*>(MapViewOfFile(g_shm, FILE_MAP_ALL_ACCESS, 0, 0, kShmSize));
+        // dwNumberOfBytesToMap = 0 maps the whole section as the host sized it -- the host picks the
+        // channel count (and thus the window size) from its own hardware_concurrency, so the client
+        // does not need to know the size ahead of time.
+        g_base = static_cast<uint8_t*>(MapViewOfFile(g_shm, FILE_MAP_ALL_ACCESS, 0, 0, 0));
         if (!g_base) { CloseHandle(g_shm); g_shm = nullptr; return false; }
 
-        // The host stamps magic/version into channel 0's header.
+        // The host stamps magic/version/channelCount into channel 0's header (offset 0 regardless of
+        // the channel count, so this is always readable before that count is known).
         auto* hdr0 = ChannelHeader(g_base, 0);
-        if (hdr0->magic != kMagic || hdr0->version != kVersion)
+        if (hdr0->magic != kMagic || hdr0->version != kVersion ||
+            hdr0->channelCount == 0 || hdr0->channelCount > kMaxChannels)
         {
             UnmapViewOfFile(g_base); g_base = nullptr;
             CloseHandle(g_shm); g_shm = nullptr;
             return false;
         }
+        g_channelCount = hdr0->channelCount;
 
-        for (uint32_t i = 0; i < kChannels; ++i)
+        for (uint32_t i = 0; i < g_channelCount; ++i)
         {
             char rn[64], sn[64];
             ReqEventName(rn, sizeof(rn), i);
@@ -126,7 +138,7 @@ namespace
     {
         for (;;)
         {
-            for (uint32_t i = 0; i < kChannels; ++i)
+            for (uint32_t i = 0; i < g_channelCount; ++i)
             {
                 bool expected = false;
                 if (g_channelBusy[i].compare_exchange_strong(expected, true,

@@ -20,14 +20,13 @@
 #include <cstdio>
 
 // Compiled into both processes (32-bit DLL and 64-bit host). The shared-memory window is split into
-// kChannels independent channels, each with its own control header and payload region. Payloads are
-// FlexBuffers, endian and arch neutral so the 32-bit DLL and 64-bit host agree on bytes. Any wire change
-// bumps kVersion; the DLL rejects a host whose version differs.
+// independent channels, each with its own control header and payload region. Payloads are FlexBuffers,
+// endian and arch neutral so the 32-bit DLL and 64-bit host agree on bytes. Any wire change bumps
+// kVersion; the DLL rejects a host whose version differs.
 namespace wxl::ipc
 {
-    // The client serializes its opens onto one request slot, so a single channel is enough; the host
-    // serves it on its main thread.
-    constexpr uint32_t kChannels = 1;
+    constexpr uint32_t kMinChannels = 2;
+    constexpr uint32_t kMaxChannels = 16;
 
     constexpr const char* kShmName      = "Local\\WarcraftXLShm";
     constexpr const char* kReqEventFmt  = "Local\\WarcraftXLReq_%u";
@@ -46,7 +45,9 @@ namespace wxl::ipc
     constexpr uint32_t kInlineMax      = 64u * 1024u;
     constexpr uint32_t kChannelPayload = 768u * 1024u;
     constexpr uint32_t kChannelStride  = kHeaderSize + kChannelPayload;
-    constexpr uint32_t kShmSize        = kChannels * kChannelStride;
+
+    /** @brief Returns the shared window size for a channel count chosen at runtime. */
+    inline uint32_t ShmSize(uint32_t channelCount) { return channelCount * kChannelStride; }
 
     /** @brief Request kind, carried inside the FlexBuffers payload. */
     enum Op : uint32_t
@@ -70,13 +71,14 @@ namespace wxl::ipc
         uint32_t respSeq;      // host sets == reqSeq after writing the response
         uint32_t reqLen;       // request payload length
         uint32_t respLen;      // response payload length
-        uint32_t reserved[10]; // pad to kHeaderSize
+        uint32_t channelCount; // total channel count the host created (only meaningful on channel 0)
+        uint32_t reserved[9];  // pad to kHeaderSize
     };
 #pragma pack(pop)
 
     static_assert(sizeof(ControlHeader) == kHeaderSize, "ControlHeader must be 64 bytes");
 
-    // Channel layout helpers: window is [header|payload] * kChannels, contiguous.
+    // Channel layout helpers: window is [header|payload] * channelCount, contiguous.
 
     /** @brief Returns the byte offset of channel `i`'s control header within the window. */
     inline uint32_t ChannelHeaderOffset(uint32_t i)  { return i * kChannelStride; }

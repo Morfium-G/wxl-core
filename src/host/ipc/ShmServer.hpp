@@ -27,19 +27,25 @@
 namespace wxl::host::ipc
 {
     /**
-     * @brief Creates and maps the shared window and per-channel events.
+     * @brief Creates and maps the shared window and per-channel events, sizing the channel count from
+     *        the machine's hardware_concurrency (clamped to [kMinChannels, kMaxChannels]).
      * @return true on success
      */
     bool Create();
 
+    /** @brief Returns the channel count chosen by Create() (0 before it succeeds). */
+    uint32_t ChannelCount();
+
     /**
-     * @brief Blocks until channel `i` has a request and returns its sequence and payload bytes.
-     * @param i       channel index
-     * @param seqOut  receives the request sequence captured with the payload
-     * @param reqOut  receives the request payload bytes
+     * @brief Blocks until any channel has a request; a pool of worker threads (fewer than the channel
+     *        count) all wait on the full channel set, so whichever thread is free picks up the next
+     *        signaled channel instead of each channel being tied to one dedicated thread.
+     * @param channelOut  receives the channel index that had the request
+     * @param seqOut      receives the request sequence captured with the payload
+     * @param reqOut      receives the request payload bytes
      * @return true if a request was read
      */
-    bool WaitRequest(uint32_t i, uint32_t& seqOut, std::vector<uint8_t>& reqOut);
+    bool WaitAnyRequest(uint32_t& channelOut, uint32_t& seqOut, std::vector<uint8_t>& reqOut);
 
     /**
      * @brief Writes the response payload to channel `i` and signals the client.

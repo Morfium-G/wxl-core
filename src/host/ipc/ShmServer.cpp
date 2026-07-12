@@ -16,7 +16,11 @@
 
 #include "ipc/ShmServer.hpp"
 
+#include "core/Logger.hpp"
+
 #include <windows.h>
+#include <algorithm>
+#include <thread>
 
 using namespace wxl::ipc;
 
@@ -24,11 +28,24 @@ namespace
 {
     // Shared window and per-channel event pairs. The host creates these; the client opens them. Set once
     // in Create and read-only afterwards: each worker touches only its own channel's payload, and the
-    // control words it writes (respLen/respSeq) are single-writer per channel.
+    // control words it writes (respLen/respSeq) are single-writer per channel. Arrays are sized to the
+    // safety bound kMaxChannels; only the first g_channelCount slots are ever populated or scanned.
     HANDLE   g_shm = nullptr;
     uint8_t* g_base = nullptr;
-    HANDLE   g_reqEv[kChannels]  = {};
-    HANDLE   g_respEv[kChannels] = {};
+    uint32_t g_channelCount = 0;
+    HANDLE   g_reqEv[kMaxChannels]  = {};
+    HANDLE   g_respEv[kMaxChannels] = {};
+
+    /**
+     * @brief Picks the channel count from the machine's hardware_concurrency, clamped to a sane range.
+     * @return channel count in [kMinChannels, kMaxChannels]
+     */
+    uint32_t ComputeChannelCount()
+    {
+        unsigned hw = std::thread::hardware_concurrency();
+        if (hw == 0) hw = kMinChannels * 2; // undetectable: a conservative default
+        return std::clamp<uint32_t>(hw, kMinChannels, kMaxChannels);
+    }
 }
 
 namespace wxl::host::ipc
@@ -39,22 +56,27 @@ namespace wxl::host::ipc
      */
     bool Create()
     {
-        g_shm = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, kShmSize, kShmName);
+        g_channelCount = ComputeChannelCount();
+        const uint32_t shmSize = ShmSize(g_channelCount);
+
+        g_shm = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, shmSize, kShmName);
         if (!g_shm) return false;
-        g_base = static_cast<uint8_t*>(MapViewOfFile(g_shm, FILE_MAP_ALL_ACCESS, 0, 0, kShmSize));
+        g_base = static_cast<uint8_t*>(MapViewOfFile(g_shm, FILE_MAP_ALL_ACCESS, 0, 0, shmSize));
         if (!g_base) { CloseHandle(g_shm); g_shm = nullptr; return false; }
 
-        // Zero every channel header and stamp magic/version so the client's connect check passes.
-        for (uint32_t i = 0; i < kChannels; ++i)
+        // Zero every channel header, stamp magic/version so the client's connect check passes, and
+        // record the channel count in channel 0's header so the client learns it rather than guessing.
+        for (uint32_t i = 0; i < g_channelCount; ++i)
         {
             ControlHeader* hdr = ChannelHeader(g_base, i);
             ZeroMemory(hdr, sizeof(*hdr));
             hdr->magic = kMagic;
             hdr->version = kVersion;
+            hdr->channelCount = g_channelCount;
         }
 
         // Auto-reset events, initially non-signaled. The client opens the same names.
-        for (uint32_t i = 0; i < kChannels; ++i)
+        for (uint32_t i = 0; i < g_channelCount; ++i)
         {
             char rn[64], sn[64];
             ReqEventName(rn, sizeof(rn), i);
@@ -63,23 +85,35 @@ namespace wxl::host::ipc
             g_respEv[i] = CreateEventA(nullptr, FALSE, FALSE, sn);
             if (!g_reqEv[i] || !g_respEv[i]) return false;
         }
+
+        wxl::core::log::Printf("host: ipc window sized for %u channel(s) (hardware_concurrency=%u)",
+            g_channelCount, std::thread::hardware_concurrency());
         return true;
     }
 
+    /** @brief Returns the channel count chosen by Create() (0 before it succeeds). */
+    uint32_t ChannelCount() { return g_channelCount; }
+
     /**
-     * @brief Blocks on channel `i`'s request event and copies the request sequence and payload out.
-     * @param i       channel index
-     * @param seqOut  receives the request sequence captured with the payload
-     * @param reqOut  receives the request payload bytes
+     * @brief Blocks until any channel signals a request, then copies that channel's sequence and payload out.
+     *
+     * Auto-reset events guarantee exactly one waiting thread is released per SetEvent, so when several
+     * worker threads all call this concurrently, a burst of N signaled channels wakes exactly N threads
+     * (one channel each) -- never a double-dispatch of the same channel.
+     * @param channelOut  receives the channel index that had the request
+     * @param seqOut      receives the request sequence captured with the payload
+     * @param reqOut      receives the request payload bytes
      * @return true if a request was read
      */
-    bool WaitRequest(uint32_t i, uint32_t& seqOut, std::vector<uint8_t>& reqOut)
+    bool WaitAnyRequest(uint32_t& channelOut, uint32_t& seqOut, std::vector<uint8_t>& reqOut)
     {
-        if (i >= kChannels) return false;
-        if (WaitForSingleObject(g_reqEv[i], INFINITE) != WAIT_OBJECT_0) return false;
+        const DWORD rc = WaitForMultipleObjects(g_channelCount, g_reqEv, FALSE, INFINITE);
+        if (rc < WAIT_OBJECT_0 || rc >= WAIT_OBJECT_0 + g_channelCount) return false;
+        const uint32_t i = rc - WAIT_OBJECT_0;
 
         const ControlHeader* hdr = ChannelHeader(g_base, i);
         const uint8_t* payload = ChannelPayload(g_base, i);
+        channelOut = i;
         seqOut = hdr->reqSeq; // capture the request's sequence so the response can be stamped with it
         uint32_t n = hdr->reqLen;
         if (n > kChannelPayload) n = 0; // malformed: hand the worker an empty request
@@ -96,7 +130,7 @@ namespace wxl::host::ipc
      */
     bool PostResponse(uint32_t i, uint32_t seq, std::span<const uint8_t> resp)
     {
-        if (i >= kChannels) return false;
+        if (i >= g_channelCount) return false;
 
         ControlHeader* hdr = ChannelHeader(g_base, i);
         uint8_t* payload = ChannelPayload(g_base, i);

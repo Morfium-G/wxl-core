@@ -31,6 +31,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -48,8 +49,32 @@ namespace
     DWORD       g_clientPid = 0; // client process to shadow; host exits when it closes
     std::string g_clientRoot;    // client data root (the host runs from the client Utils folder)
 
-    // Serve store, used only by the main thread (StormLib handles are single-thread). Mounted lazily.
+    // Serve store, shared by every channel worker. StormLib handles are single-thread, so raw archive
+    // I/O is serialized behind g_mpqMutex; the much more expensive Transform call that follows a read
+    // runs outside the lock, so worker threads still reshape different files concurrently. Mounted lazily.
     std::unique_ptr<MpqStore> g_mpq;
+    std::mutex                g_mpqMutex;
+
+    /** @brief Serialized MpqStore::ReadAll. @return false if the file is absent. */
+    bool MpqReadAll(const std::string& name, std::vector<uint8_t>& out)
+    {
+        std::lock_guard<std::mutex> lock(g_mpqMutex);
+        return g_mpq->ReadAll(name, out);
+    }
+
+    /** @brief Serialized MpqStore::Exists. @return true if the file is present. */
+    bool MpqExists(const std::string& name)
+    {
+        std::lock_guard<std::mutex> lock(g_mpqMutex);
+        return g_mpq->Exists(name);
+    }
+
+    /** @brief Serialized MpqStore::ResolveByFileName. @return a serveable path, or empty if none is indexed. */
+    std::string MpqResolveByFileName(const std::string& name)
+    {
+        std::lock_guard<std::mutex> lock(g_mpqMutex);
+        return g_mpq->ResolveByFileName(name);
+    }
 
     // Large files are served zero-copy: the host copies the bytes once into a named shared section and
     // keeps it alive until the client closes the id.
@@ -91,6 +116,21 @@ namespace
         size_t slash = root.find_last_of("\\/");
         if (slash != std::string::npos) root = root.substr(0, slash);
         return root;
+    }
+
+    /**
+     * @brief Picks the worker-thread count from the channel count: half, floored to at least one.
+     *
+     * Channels bound how many requests the client can have in flight; workers bound how many run at
+     * once. Using fewer workers than channels leaves headroom on the machine for the game client itself
+     * rather than pinning one CPU-bound thread to every logical core during a streaming burst.
+     * @param channelCount  channel count chosen by wxl::host::ipc::Create()
+     * @return worker thread count, at least 1
+     */
+    uint32_t ComputeWorkerCount(uint32_t channelCount)
+    {
+        const uint32_t workers = channelCount / 2;
+        return workers ? workers : 1;
     }
 
     /**
@@ -365,7 +405,7 @@ namespace
         }
 
         std::vector<uint8_t> raw;
-        if (!g_mpq->ReadAll(readName, raw))
+        if (!MpqReadAll(readName, raw))
             return false;
 
         std::vector<uint8_t> reshaped;
@@ -400,12 +440,12 @@ namespace
         }
 
         // Last resort: serve the same file name from wherever the mounted set stores it.
-        std::string real = g_mpq->ResolveByFileName(name);
+        std::string real = MpqResolveByFileName(name);
         if (!real.empty() && ProduceCandidate(name, real, out))
             return true;
         for (const std::string& alias : aliases)
         {
-            real = g_mpq->ResolveByFileName(alias);
+            real = MpqResolveByFileName(alias);
             if (!real.empty() && ProduceCandidate(name, real, out))
                 return true;
         }
@@ -509,7 +549,7 @@ namespace
             case OpFileExists:
             {
                 std::string name = vec[1].AsString().str();
-                bool ok = g_mpq->Exists(name) || wxl::host::Exists(name);
+                bool ok = MpqExists(name) || wxl::host::Exists(name);
                 fbb.Vector([&]() { fbb.UInt(ok ? StOk : StNotFound); });
                 break;
             }
@@ -565,17 +605,68 @@ namespace
 
         if (g_console) SetConsoleTitleA("WarcraftXLHost  -  client <-> host IPC");
         HOST_CONSOLE("WarcraftXLHost serving. Waiting for requests...\n\n");
-        wlog::Printf("host: serving (%u channel)", kChannels);
+        const uint32_t channels = wxl::host::ipc::ChannelCount(); // chosen by Create() from hardware_concurrency
+        const uint32_t workerCount = ComputeWorkerCount(channels);
+        wlog::Printf("host: serving (%u channels, %u worker thread(s))", channels, workerCount);
 
-        // Single channel: the client serializes its opens, so serve them on this thread.
-        std::vector<uint8_t> req, resp; // request and response payload buffers, reused each iteration
-        for (;;)
+        // Fewer worker threads than channels: channels bound how many requests the client can have in
+        // flight at once, workers bound how many Transforms actually run concurrently on this machine's
+        // cores. Every worker waits on the full channel set (WaitAnyRequest) and picks up whichever one
+        // is free, rather than one thread being tied to one channel -- so a burst larger than the worker
+        // count still queues on the (idle, cheap) channel events instead of spinning up one CPU-bound
+        // thread per logical core and starving the game client running on the same machine.
+        auto worker = []() {
+            std::vector<uint8_t> req, resp;
+            for (;;)
+            {
+                uint32_t ch = 0, reqSeq = 0;
+                if (!wxl::host::ipc::WaitAnyRequest(ch, reqSeq, req)) break;
+                ProcessRequest(req, resp);
+                wxl::host::ipc::PostResponse(ch, reqSeq, resp);
+            }
+        };
+
+        std::vector<std::thread> workers;
+        for (uint32_t w = 1; w < workerCount; ++w)
+            workers.emplace_back(worker);
+
+        worker(); // this thread is also a pool worker; its loop only ends at process teardown
+        for (auto& t : workers) t.join();
+        return 0;
+    }
+}
+
+namespace
+{
+    /**
+     * @brief Resolves one asset through the serve pipeline and writes the bytes to a file.
+     *        Reuses the process-wide host state, so a later call in the same process (e.g. a
+     *        texture request after its model) sees whatever the earlier call registered.
+     * @param name  asset path as the client would request it (lowercase backslash form)
+     * @param dest  output file receiving the served bytes
+     * @return process exit code (0 = served and written)
+     */
+    int ProvideToFile(const std::string& name, const std::string& dest)
+    {
+        std::vector<uint8_t> out;
+        if (!wxl::host::Provide(name, out) && !ProduceServed(name, out))
         {
-            uint32_t reqSeq = 0;
-            if (!wxl::host::ipc::WaitRequest(0, reqSeq, req)) break;
-            ProcessRequest(req, resp);
-            wxl::host::ipc::PostResponse(0, reqSeq, resp);
+            wlog::Printf("provide: %s -> MISS", name.c_str());
+            fprintf(stderr, "MISS %s\n", name.c_str());
+            return 1;
         }
+
+        FILE* f = fopen(dest.c_str(), "wb");
+        if (!f)
+        {
+            fprintf(stderr, "cannot write %s\n", dest.c_str());
+            return 2;
+        }
+        fwrite(out.data(), 1, out.size(), f);
+        fclose(f);
+        wlog::Printf("provide: %s -> %u bytes -> %s", name.c_str(),
+                     static_cast<uint32_t>(out.size()), dest.c_str());
+        printf("OK %u bytes -> %s\n", static_cast<uint32_t>(out.size()), dest.c_str());
         return 0;
     }
 }
@@ -583,24 +674,45 @@ namespace
 /**
  * @brief Parses command-line arguments, opens the log, and runs the serve loop.
  * @param argc  argument count
- * @param argv  argument values (--data, --client-pid, --console)
+ * @param argv  argument values (--data, --client-pid, --console,
+ *              --provide NAME --out FILE [--provide NAME2 --out FILE2 ...])
+ *              repeated --provide/--out pairs run in the same process, in order, so a later
+ *              request (e.g. a texture) sees state an earlier one (e.g. its model) registered
  * @return process exit code
  */
 int main(int argc, char** argv)
 {
     g_dataDir = ExeDir();
 
+    std::vector<std::pair<std::string, std::string>> provides; // (name, out)
     for (int i = 1; i < argc; ++i)
     {
         std::string a = argv[i];
         if (a == "--data" && i + 1 < argc) g_dataDir = argv[++i];
         else if (a == "--client-pid" && i + 1 < argc) g_clientPid = static_cast<DWORD>(strtoul(argv[++i], nullptr, 10));
         else if (a == "--console") g_console = true;
+        else if (a == "--provide" && i + 1 < argc) provides.push_back({ argv[++i], "provided.bin" });
+        else if (a == "--out" && i + 1 < argc && !provides.empty()) provides.back().second = argv[++i];
     }
 
     wlog::Open((g_dataDir + "\\WarcraftXLHost.log").c_str());
     wlog::Printf("WarcraftXLHost starting (build %s %s)", __DATE__, __TIME__);
-    int rc = Serve();
+    int rc = 0;
+    if (!provides.empty())
+    {
+        g_clientRoot = ClientRoot();
+        wxl::host::SetClientRoot(g_clientRoot);
+        g_mpq = std::make_unique<MpqStore>();
+        g_mpq->Mount(g_clientRoot);
+        wxl::host::LogRegisteredHandlers();
+        for (const auto& [name, dest] : provides)
+        {
+            rc = ProvideToFile(name, dest);
+            if (rc) break;
+        }
+    }
+    else
+        rc = Serve();
     wlog::Close();
     return rc;
 }
