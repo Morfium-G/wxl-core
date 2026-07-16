@@ -144,6 +144,38 @@ namespace wxl::offsets::game::world
     constexpr uintptr_t kAsyncDestroy = 0x004B9DE0;
     using AsyncDestroyFn = void(__cdecl*)(void* asyncObj);
 
+    // --- async disk-queue producer (multithreading) ---
+    // Creates the non-streaming "Disk Queue" worker (1 in our context; native code supports up to 3,
+    // gated by streaming mode). One caller (boot). Detoured to extend with 2 more queue/thread pairs.
+    constexpr uintptr_t kAsyncFileReadInitialize = 0x004BAA40;
+    using AsyncFileReadInitializeFn = void(__cdecl*)(uint32_t maxPerSecond, uint32_t pumpBudgetMs);
+    // Enqueue: routes every read request to a queue. Native code always picks slot 0 (kAsyncQueueSlots)
+    // outside streaming mode, regardless of how many worker threads exist. Detoured for round-robin.
+    constexpr uintptr_t kAsyncFileReadObject = 0x004BAB50;
+    using AsyncFileReadObjectFn = void(__cdecl*)(void* asyncObj, uint32_t highPriorityFlag);
+    // Allocate one AsyncQueue (0x24 bytes), no args. Reused verbatim to add worker slots.
+    constexpr uintptr_t kAsyncQueueAlloc = 0x004BA8E0;
+    using AsyncQueueAllocFn = void*(__cdecl*)();
+    // Wrap a queue + SThread__Create its worker thread, named from the 2nd arg. Reused verbatim.
+    constexpr uintptr_t kAsyncThreadWrap = 0x004BA980;
+    using AsyncThreadWrapFn = void(__cdecl*)(void* queue, const char* name);
+    // Priority-sorted insert into a queue's pending list ("list A" / "list B", chosen by the queue's own
+    // +0x20 flag inside AsyncFileReadObject; a queue Patch A creates never sets that flag, so it always
+    // resolves to AsyncFileReadLinkObject).
+    constexpr uintptr_t kAsyncFileReadLinkObject = 0x004BA3D0;
+    using AsyncFileReadLinkObjectFn = void(__cdecl*)(void* asyncObj, uint32_t highPriorityFlag);
+    // Same priority-sorted insert, "list B" -- chosen instead of kAsyncFileReadLinkObject only for a
+    // queue whose own +0x20 flag is set (native code sets it only on the streaming-only 3rd slot; a
+    // queue Patch A creates never sets it, so this is unreachable under Patch A/B, kept for parity).
+    constexpr uintptr_t kAsyncFileReadLinkObjectAlt = 0x004BA530;
+    // Splice a TS-list node to the head of its list. __thiscall: ECX = the list head (queue+0x8), one
+    // stack arg = the node, callee-popped (ret 4). Used by AsyncFileReadObject's force-wait fast path.
+    constexpr uintptr_t kTSListLinkToHead = 0x007B5020;
+    using TSListLinkToHeadFn = void(__thiscall*)(void* listHead, void* node);
+    // 3-slot AsyncQueue* array (stride 4): [0] = "Disk Queue" (always live), [1]/[2] = native streaming-
+    // only slots, valid-but-null outside streaming mode. Patch A populates [1]/[2] itself.
+    constexpr uintptr_t kAsyncQueueSlots = 0x00B4A20C;
+
     // --- signatures ---
     // World tick + drain (param on stack).
     using World_TickFn = void(__cdecl*)(int param);

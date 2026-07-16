@@ -1,4 +1,4 @@
-// Game-logic detours: publish OnModelLoad (and other non-render events as their RE lands).
+// Game-logic detours: publish OnModelLoad and other non-render events.
 // Copyright (C) 2026 WarcraftXL
 //
 // This program is free software: you can redistribute it and/or modify
@@ -32,6 +32,8 @@
 
 #include <windows.h>
 
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -64,6 +66,8 @@ namespace
     gxoff::TextureUpdateFn       g_origTexUpdate    = nullptr;
     gxoff::TextureCreateFn       g_origTexCreate    = nullptr;
     wld::AsyncServiceQueuesFn    g_origAsyncDrain   = nullptr;
+    wld::AsyncFileReadInitializeFn g_origAsyncFileReadInit = nullptr;
+    wld::AsyncFileReadObjectFn   g_origAsyncFileReadObject = nullptr; // captured, never called: hkAsyncFileReadObject fully replaces the original
     adt::Map_ChunkBuildFn      g_origChunkBuild   = nullptr;
     adt::ChunkDestroyFn        g_origChunkDestroy = nullptr;
     wmo::Wmo_RootCompleteFn    g_origWmoRoot      = nullptr;
@@ -74,6 +78,7 @@ namespace
     unit::ObjectMsgHandlerFn   g_origObjDestroy   = nullptr;
     unit::TargetSetFn          g_origTargetSet    = nullptr;
     snd::PlaySoundFn           g_origPlaySound    = nullptr;
+    snd::PlaySoundKitFn        g_origPlaySoundKit = nullptr;
 
     /**
      * @brief Detours model init, emitting OnModelLoadPre at entry and OnModelLoad after parsing.
@@ -108,7 +113,7 @@ namespace
     /**
      * @brief Guards the per-batch material-key builder against unimplemented shader types.
      *
-     * sub_836C90 (kBuildBatchMaterial) reads M2Batch::shaderId (batch+2) and uses bits 0-14 as a
+     * kBuildBatchMaterial reads M2Batch::shaderId (batch+2) and uses bits 0-14 as a
      * switch index when bit 0x8000 is set. The switch only handles values 0-3; for higher values it
      * falls through with EBX=0 and crashes at 0x836D11 (mov cl, [eax] with eax=0).
      * Modern collection M2s can have shaderId values > 3; returning nullptr for those is safe because
@@ -299,14 +304,14 @@ namespace
     // build still uploads from (the 0x40cb6a use-after-free).
     thread_local int g_drainDepth = 0;
 
-    // Serialize the reentrant drain. The completed-read queue is a Blizzard TSExplicitList: each node holds
-    // its link at node+0x28 {next, tagged-prev}; the head (a node base) is at the completed-head global.
-    // Addresses + arithmetic verified against the drain's own head-unlink. The lock is a recursive Storm
+    // Serialize the reentrant drain. The completed-read queue is an intrusive doubly-linked list: each node
+    // holds its link at node+0x28 {next, tagged-prev}; the head (a node base) is at the completed-head global.
+    // Addresses + arithmetic verified against the drain's own head-unlink. The lock is a recursive
     // critical section taken by ECX.
     namespace adrain
     {
-        constexpr uint32_t kLockEnter     = 0x00774640; // SCritSect enter, ecx = lock
-        constexpr uint32_t kLockLeave     = 0x00774650; // SCritSect leave, ecx = lock
+        constexpr uint32_t kLockEnter     = 0x00774640; // critical-section enter, ecx = lock
+        constexpr uint32_t kLockLeave     = 0x00774650; // critical-section leave, ecx = lock
         constexpr uint32_t kAsyncLock     = 0x00B4A240; // the recursive queue lock
         constexpr uint32_t kCompletedHead = 0x00AC3474; // first completed node (sentinel/empty if &1 or 0)
         constexpr uint32_t kAwaitedObj    = 0x00B4A204; // node a force-wait blocks on (0 = none)
@@ -441,6 +446,111 @@ namespace
     }
 
     /**
+     * @brief Detours the disk-queue init to add 2 more worker threads alongside the native one.
+     *
+     * Runs the original body unmodified first (creates queue slot 0, "Disk Queue", exactly as shipped),
+     * then extends slots 1/2 with the same native helpers the original loop itself calls when streaming
+     * mode is on -- so the resulting AsyncQueue/AsyncThread objects are byte-identical in shape and
+     * self-register into the generic tracking lists the native teardown already walks. Does not touch
+     * the streaming-mode flag or anything else the original touches. On its own this creates 2 idle
+     * worker threads; AsyncFileReadObject's enqueue routing (a separate detour) must also change for
+     * either thread to ever receive work.
+     * @param maxPerSecond  native param, forwarded unmodified.
+     * @param pumpBudgetMs  native param, forwarded unmodified.
+     */
+    void __cdecl hkAsyncFileReadInitialize(uint32_t maxPerSecond, uint32_t pumpBudgetMs)
+    {
+        g_origAsyncFileReadInit(maxPerSecond, pumpBudgetMs);
+
+        static const char* const kExtraNames[] = { "WXL Disk Queue 2", "WXL Disk Queue 3" };
+        auto* slots = reinterpret_cast<void**>(wld::kAsyncQueueSlots);
+        auto alloc = reinterpret_cast<wld::AsyncQueueAllocFn>(wld::kAsyncQueueAlloc);
+        auto wrap  = reinterpret_cast<wld::AsyncThreadWrapFn>(wld::kAsyncThreadWrap);
+        for (int i = 1; i <= 2; ++i)
+        {
+            void* queue = alloc();
+            if (!queue) { WLOG_WARN("AsyncFileReadInitialize: extra queue %d alloc failed", i); continue; }
+            slots[i] = queue;
+            wrap(queue, kExtraNames[i - 1]);
+        }
+        WLOG_INFO("AsyncFileReadInitialize: extended to 3 disk-queue workers");
+    }
+
+    // Native async-object layout (0x30 bytes total). Only the fields the enqueue detour touches are
+    // named; the rest stay opaque padding.
+#pragma pack(push, 1)
+    struct AsyncObjectView
+    {
+        uint8_t  _pad00[0x18]; // handle/buffer/len/owner/completion, untouched here
+        uint32_t queue;        // +0x18
+        uint32_t timestamp;    // +0x1c
+        uint8_t  priority;     // +0x20
+        uint8_t  _pad21[3];    // +0x21..0x23: serviced/queue-state/in-progress flags, untouched here
+        uint8_t  netFlag;      // +0x24, untouched here (only ever set on the streaming-only routing path)
+        uint8_t  rearm;        // +0x25
+    };
+    // Native AsyncQueue layout: only the "list B" selector flag is touched here.
+    struct AsyncQueueView
+    {
+        uint8_t  _pad00[0x20];
+        uint32_t secondListFlag; // +0x20
+    };
+#pragma pack(pop)
+    static_assert(sizeof(AsyncObjectView) <= 0x30, "AsyncObjectView must fit the native 0x30-byte object");
+    static_assert(offsetof(AsyncObjectView, queue)     == 0x18, "AsyncObjectView.queue");
+    static_assert(offsetof(AsyncObjectView, timestamp) == 0x1c, "AsyncObjectView.timestamp");
+    static_assert(offsetof(AsyncObjectView, priority)  == 0x20, "AsyncObjectView.priority");
+    static_assert(offsetof(AsyncObjectView, netFlag)   == 0x24, "AsyncObjectView.netFlag");
+    static_assert(offsetof(AsyncObjectView, rearm)     == 0x25, "AsyncObjectView.rearm");
+    static_assert(offsetof(AsyncQueueView, secondListFlag) == 0x20, "AsyncQueueView.secondListFlag");
+
+    /**
+     * @brief Detours the disk-queue enqueue to round-robin across every live worker queue.
+     *
+     * Native code always selects queue slot 0 outside streaming mode regardless of how many worker
+     * threads exist, which left AsyncFileReadInitialize's 2 extra threads permanently idle. Reimplements
+     * only the queue-selection step; the lock, force-wait fast path and insert dispatch call the exact
+     * same native subroutines the original uses, byte-for-byte, so behaviour is unchanged apart from
+     * which queue an object lands in. A trailing streaming-mode-gated no-op call in the original is not
+     * reachable outside streaming mode, so it is omitted.
+     * @param obj               async object being enqueued.
+     * @param highPriorityFlag  native param, forwarded unmodified to the insert call.
+     */
+    void __cdecl hkAsyncFileReadObject(void* obj, uint32_t highPriorityFlag)
+    {
+        auto* o = static_cast<AsyncObjectView*>(obj);
+        auto* slots = reinterpret_cast<void* const*>(wld::kAsyncQueueSlots);
+
+        static std::atomic<uint32_t> s_rr{ 0 };
+        const uint32_t live = slots[1] ? (slots[2] ? 3u : 2u) : 1u;
+        void* queue = slots[s_rr.fetch_add(1, std::memory_order_relaxed) % live];
+        auto* q = static_cast<AsyncQueueView*>(queue);
+
+        adrain::Lock();
+        const bool forceWait = (reinterpret_cast<uint32_t>(obj) == adrain::Rd(adrain::kAwaitedObj));
+        o->queue = reinterpret_cast<uint32_t>(queue);
+
+        if (forceWait)
+        {
+            o->priority = (o->priority > 0x7f) ? 0x80 : 0;
+            o->timestamp = *reinterpret_cast<uint32_t*>(
+                *reinterpret_cast<uint8_t**>(gxoff::kGxDevicePtr) + 0xf68);
+            reinterpret_cast<wld::TSListLinkToHeadFn>(wld::kTSListLinkToHead)(
+                reinterpret_cast<uint8_t*>(queue) + 0x8, obj);
+            o->rearm = 0;
+        }
+        else if (q->secondListFlag == 0)
+        {
+            reinterpret_cast<wld::AsyncFileReadLinkObjectFn>(wld::kAsyncFileReadLinkObject)(obj, highPriorityFlag);
+        }
+        else
+        {
+            reinterpret_cast<wld::AsyncFileReadLinkObjectFn>(wld::kAsyncFileReadLinkObjectAlt)(obj, highPriorityFlag);
+        }
+        adrain::Unlock();
+    }
+
+    /**
      * @brief Detours the by-name texture create, emitting OnBlpLoad after the request resolves.
      *
      * Fires on every reference (returns the cached handle on a hit), so the event carries the requested
@@ -536,6 +646,21 @@ namespace
         static bool logged = false;
         if (!logged) { logged = true; WLOG_INFO("sound: play hook active"); }
         return g_origPlaySound(scriptState);
+    }
+
+    /**
+     * @brief Diagnostic-only: logs every SoundKitID play attempt and its result code.
+     *
+     * Disambiguates a data resolution gap (returns 5/6, no file I/O ever attempted) from a
+     * cache-served hit (returns success with no corresponding Storage_FileOpen) for the in-world
+     * interface/spell/creature sound investigation.
+     */
+    int __cdecl hkPlaySoundKit(int soundKitId, int p2, int p3, int* p4, int p5,
+                               uint32_t* p6, uint32_t p7, int p8)
+    {
+        int r = g_origPlaySoundKit(soundKitId, p2, p3, p4, p5, p6, p7, p8);
+        WLOG_INFO("audio-diag: PlaySoundKit id=%d -> %d", soundKitId, r);
+        return r;
     }
 
     /**
@@ -650,8 +775,8 @@ namespace
      */
     void __fastcall hkSlotDispatch(void* cmo, void* edx, uint32_t modelSlot, void* itemDataPtr, uint32_t postFlag)
     {
-        // Native must run first: for head (slot 11), sub_4eefa0 checks if slot 11 is occupied and
-        // returns NULL if so — which would skip geoset writes. Let native populate slot 11 first,
+        // Native must run first: for head (slot 11), the native handler checks if slot 11 is occupied and
+        // returns NULL if so -- which would skip geoset writes. Let native populate slot 11 first,
         // then subscribers receive the event with the slot already in its post-dispatch state.
         g_origSlotDispatch(cmo, edx, modelSlot, itemDataPtr, postFlag);
         ev::ItemSlotChangeArgs a{ cmo, modelSlot, itemDataPtr };
@@ -677,7 +802,7 @@ namespace
     /**
      * @brief Detours the per-render-ctx M2 scene-graph update, emitting OnM2PerFrameUpdate per visible M2.
      *
-     * Fires recursively through the scene graph once per visible M2 render context per frame — this
+     * Fires recursively through the scene graph once per visible M2 render context per frame -- this
      * is the correct hook point for per-frame bone-matrix copy and geoset (index buffer) filtering,
      * both of which must run in step with the render context rather than once per EndScene.
      * @param renderCtx  the M2 render context being updated.
@@ -694,12 +819,12 @@ namespace
      * @brief Detours bone-palette build, emitting OnBuildBonePalette after the engine fills the buffer.
      *
      * Called from two sites per collection M2 per frame:
-     *   (a) sub_8309C0 (kUpdateAttachedModels), inside kM2PerFrameUpdate of the parent character.
+     *   (a) the attached-model update path, inside kM2PerFrameUpdate of the parent character.
      *   (b) The outer scene-traversal loop (0x821B4E), which runs AFTER the parent's PerFrameUpdate.
      *
      * Site (b) overwrites any bone-palette modifications that OnM2PerFrameUpdate subscribers made,
      * reverting the collection M2 to its bind pose every frame. By hooking POST-order here,
-     * subscribers can re-apply their modifications immediately after the engine's fill — guaranteed
+     * subscribers can re-apply their modifications immediately after the engine's fill -- guaranteed
      * to be the last write before the GPU upload regardless of scene-list ordering.
      *
      * Calling convention: fastcall, ecx = renderCtx, 5 stack args, ret 0x14 (callee-cleanup).
@@ -715,6 +840,30 @@ namespace
 
 namespace wxl::runtime::game
 {
+    /**
+     * @brief Installs the disk-queue worker-count extension before the client's own boot reaches it.
+     *
+     * The client creates its disk-queue worker thread very early in boot, well before the render device
+     * exists -- installing this hook from the same deferred point every other game-logic detour uses
+     * (after the render device shows up) means the client's own call already ran unhooked by the time
+     * the hook is armed, so the extra worker threads this detour adds were never actually created. Must
+     * run synchronously, before the client's own startup proceeds, same timing requirement as the
+     * archive-mount guard. Only extends an already-initialized subsystem after the real call runs
+     * (call-original-then-extend); does not touch file-content serving, so it does not carry the
+     * separate heap-corruption risk that keeps the content-serving hooks deferred.
+     */
+    void InstallEarly()
+    {
+        wxl::core::hook::Install("AsyncFileReadInitialize", wld::kAsyncFileReadInitialize,
+                                 reinterpret_cast<void*>(&hkAsyncFileReadInitialize),
+                                 reinterpret_cast<void**>(&g_origAsyncFileReadInit));
+        wxl::core::hook::Install("AsyncFileReadObject", wld::kAsyncFileReadObject,
+                                 reinterpret_cast<void*>(&hkAsyncFileReadObject),
+                                 reinterpret_cast<void**>(&g_origAsyncFileReadObject));
+        wxl::core::hook::EnableAll();
+        WLOG_INFO("game: early hooks installed (AsyncFileReadInitialize, AsyncFileReadObject)");
+    }
+
     /**
      * @brief Installs every game-logic detour through the core hook layer.
      */
@@ -747,12 +896,13 @@ namespace wxl::runtime::game
         wxl::core::hook::Install("AsyncDrain", wld::kAsyncServiceQueues,
                                  reinterpret_cast<void*>(&hkAsyncDrain),
                                  reinterpret_cast<void**>(&g_origAsyncDrain));
+        // AsyncFileReadInitialize / AsyncFileReadObject: installed earlier, see InstallEarly().
         wxl::core::hook::Install("ChunkBuild", adt::kChunkBuild,
                                  reinterpret_cast<void*>(&hkChunkBuild),
                                  reinterpret_cast<void**>(&g_origChunkBuild));
         // ChunkDestroy (ADT cancel-on-teardown) temporarily disabled: it correlates with a render-path
-        // null-deref (0x7c846c) and the RE flagged the cancel timing as unconfirmed. Re-enable after the
-        // one-shot probe (FUN_007bfe60 free + FUN_007d6ef0 entry) confirms the free is teardown vs sibling.
+        // null-deref (0x7c846c) and the cancel timing relative to a sibling free is unconfirmed. Re-enable
+        // once that ordering is confirmed as teardown rather than a sibling free.
         (void)&hkChunkDestroy; (void)&g_origChunkDestroy;
         wxl::core::hook::Install("WmoRootComplete", wmo::kRootComplete,
                                  reinterpret_cast<void*>(&hkWmoRootComplete),
@@ -778,6 +928,9 @@ namespace wxl::runtime::game
         wxl::core::hook::Install("PlaySound", snd::kPlaySound,
                                  reinterpret_cast<void*>(&hkPlaySound),
                                  reinterpret_cast<void**>(&g_origPlaySound));
+        wxl::core::hook::Install("PlaySoundKit", snd::kPlaySoundKit,
+                                 reinterpret_cast<void*>(&hkPlaySoundKit),
+                                 reinterpret_cast<void**>(&g_origPlaySoundKit));
         wxl::core::hook::Install("CharModelSlotDispatch", m2::kCharModelSlotDispatch,
                                  reinterpret_cast<void*>(&hkSlotDispatch),
                                  reinterpret_cast<void**>(&g_origSlotDispatch));
@@ -799,6 +952,6 @@ namespace wxl::runtime::game
             wxl::core::mem::Patch(reinterpret_cast<void*>(adt::kLiquidRowFlagTest), guard, sizeof guard);
         }
 
-        WLOG_INFO("game: hooks installed (M2Init, M2FinalizeSkin, M2SetupBatchAlpha, DoodadSpawn, TextureUpdate, TextureCreate, ChunkBuild, WmoRootComplete, WmoGroupParse, CWorldEnter, FramePump, ObjectUpdate, ObjectDestroy, TargetSet, PlaySound, CharModelSlotDispatch, CharModelSlotClear, M2PerFrameUpdate, M2BuildBonePalette)");
+        WLOG_INFO("game: hooks installed (M2Init, M2FinalizeSkin, M2SetupBatchAlpha, DoodadSpawn, TextureUpdate, TextureCreate, ChunkBuild, WmoRootComplete, WmoGroupParse, CWorldEnter, FramePump, ObjectUpdate, ObjectDestroy, TargetSet, PlaySound, PlaySoundKit, CharModelSlotDispatch, CharModelSlotClear, M2PerFrameUpdate, M2BuildBonePalette)");
     }
 }

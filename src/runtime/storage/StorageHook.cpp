@@ -20,9 +20,11 @@
 
 #include "core/Hook.hpp"
 #include "core/Logger.hpp"
+#include "core/Mem.hpp"
 #include "offsets/engine/Io.hpp"
 
 #include <windows.h>
+#include <atomic>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -81,7 +83,8 @@ namespace
     io::Storage_FileReadFn  g_origRead  = nullptr;
     io::Storage_FileSeekFn  g_origSeek  = nullptr;
     io::Storage_FileCloseFn g_origClose = nullptr;
-    io::Storage_ArchiveMountFn g_origArchiveMount = nullptr;
+    io::MopaqOpenArchiveFn g_origMopaqOpenArchive = nullptr;
+    io::InitializeWowConfigFn g_origInitializeWowConfig = nullptr;
 
     uint32_t g_served = 0; // files served from the host
     uint32_t g_missed = 0; // host connected but file not served (read natively)
@@ -122,16 +125,26 @@ namespace
     }
 
     /**
+     * @brief Reports whether a name looks like a streamed-audio file.
+     * @param name  file name to test.
+     * @return true for .wav/.mp3/.ogg.
+     */
+    bool LooksLikeAudio(std::string_view name)
+    {
+        return EndsWithCI(name, ".wav") || EndsWithCI(name, ".mp3") || EndsWithCI(name, ".ogg");
+    }
+
+    /**
      * @brief Reports whether a name is routed to the host.
      *
      * Skips .pub/.url, which are existence probes rather than archive content. Skips the modern terrain
      * sidecars the client has no loader for: .tex (the per-map texture catalog) and _lod.adt (the
      * low-detail tile). Serving their bytes stalls or faults the terrain load, so the open is left to miss
-     * natively and the loader proceeds without them. Skips audio (.wav/.mp3/.ogg): world sound loads read
-     * through the client's async path, which a synthetic handle never completes (glue-screen music reads
-     * synchronously and survives; world SFX/music never finish loading). No transform targets audio and no
-     * host-only source ships it, so the native archives already serve it correctly. The name is already
-     * validated/non-empty (CopyArchiveName).
+     * natively and the loader proceeds without them. Audio (.wav/.mp3/.ogg) is served: glue-screen audio
+     * (music/ambience/button clicks) confirmed working through a synthetic handle; in-world interface/
+     * spell/creature sounds are currently silent in-game with no crash/hang, cause not yet found -- see
+     * AudioDiag, which logs every audio open/read/close to characterize what actually happens. The name
+     * is already validated/non-empty (CopyArchiveName).
      * @param name  file name to test.
      * @return true when the name should be served from the host.
      */
@@ -139,8 +152,30 @@ namespace
     {
         if (EndsWithCI(name, ".pub") || EndsWithCI(name, ".url")) return false;
         if (EndsWithCI(name, ".tex") || EndsWithCI(name, "_lod.adt")) return false;
-        if (EndsWithCI(name, ".wav") || EndsWithCI(name, ".mp3") || EndsWithCI(name, ".ogg")) return false;
         return true;
+    }
+
+    // Diagnostic-only: characterizes FMOD's actual access pattern against a synthetic handle now that
+    // audio is no longer excluded from host serving. Capped so a long play session cannot flood the log.
+    namespace adiag
+    {
+        std::atomic<uint32_t> g_opens{ 0 };
+        std::atomic<uint32_t> g_reads{ 0 };
+        constexpr uint32_t kMaxOpenLogs = 150;
+        constexpr uint32_t kMaxReadLogs = 500;
+
+        void LogOpen(const char* name, const char* mode)
+        {
+            if (g_opens.fetch_add(1, std::memory_order_relaxed) >= kMaxOpenLogs) return;
+            WLOG_INFO("audio-diag: OPEN '%s' mode=%s thread=%lu", name, mode, GetCurrentThreadId());
+        }
+
+        void LogRead(const char* name, uint32_t position, uint32_t len, uint32_t got)
+        {
+            if (g_reads.fetch_add(1, std::memory_order_relaxed) >= kMaxReadLogs) return;
+            WLOG_INFO("audio-diag: READ '%s' pos=%u len=%u got=%u thread=%lu",
+                      name, position, len, got, GetCurrentThreadId());
+        }
     }
 
     /**
@@ -289,6 +324,7 @@ namespace
                 WLOG_INFO("Storage: serve '%s' (%u B, %s) from host%s",
                           handleName.c_str(), r.size, mode, logSuffix ? logSuffix : "");
             ++g_served;
+            if (LooksLikeAudio(handleName)) adiag::LogOpen(handleName.c_str(), mode);
             return true;
         }
 
@@ -316,7 +352,13 @@ namespace
         // sequence loads are the exception: modern .anim siblings need the same host normalization as
         // regular archive opens, otherwise AFM2/AFSB/raw modern payloads bypass wxl-modern-anim.
         const bool specificAnim = archive != nullptr && EndsWithCI(safeName, ".anim");
-        if (archive != nullptr && !specificAnim) return false;
+        if (archive != nullptr && !specificAnim)
+        {
+            if (LooksLikeAudio(safeName))
+                WLOG_INFO("audio-diag: SPECIFIC-ARCHIVE open '%s' archive=%p -> native only (host never tried)",
+                          safeName.c_str(), archive);
+            return false;
+        }
 
         if ((++g_opens % 2000) == 0)
             WLOG_INFO("Storage stats: opens=%u served=%u missed=%u", g_opens, g_served, g_missed);
@@ -439,6 +481,9 @@ namespace
                 }
             }
 
+            if (f->fullName && LooksLikeAudio(f->fullName))
+                adiag::LogRead(f->fullName, f->position, want, got);
+
             f->position += got;
             if (read) *read = got;
             return (got == len) ? 1 : 0; // nonzero only when the full request was satisfied
@@ -480,6 +525,9 @@ namespace
         if (IsOurs(handle))
         {
             auto* f = reinterpret_cast<HostFile*>(handle);
+            if (f->fullName && LooksLikeAudio(f->fullName))
+                WLOG_INFO("audio-diag: CLOSE '%s' pos=%u size=%u thread=%lu",
+                          f->fullName, f->position, f->size, GetCurrentThreadId());
             if (f->mapView)
             {
                 // Zero-copy: buffer points into the mapping, so unmap (do not free) then release the section.
@@ -499,20 +547,28 @@ namespace
     }
 
     /**
-     * @brief Detours the per-archive mount, dropping the loose override directories the host owns.
+     * @brief Detours the true archive/directory mount primitive, dropping the loose override
+     *        directories the host owns.
      *
-     * The client mounts every base and patch archive through here. A loose override that is a DIRECTORY
-     * (the modern data the host serves) is skipped, so the client never indexes its huge tree into its
-     * 32-bit address space; the file-open detour serves those files from the host instead. Real .MPQ
-     * files (the native data the client must read itself) mount unchanged. Returning 0 reads as an
-     * absent optional archive, which the boot path tolerates.
+     * Every native mount call in the client -- the boot-time base+patch table, the per-patch nested
+     * "alternate.MPQ" probe, and the runtime patch-download mounts -- funnels through this one
+     * primitive, so hooking here closes every one of those paths at once.
+     *
+     * Real .MPQ archives mount natively, exactly like stock. Making the host the sole reader of real
+     * archive content too was tried and reverted: each individual blocker hit along the way was fixable,
+     * but the cumulative in-game result was not good enough, so real archives went back to mounting
+     * natively -- the hooks/offsets stay in place since they may be useful for something else later.
+     * A loose override that is a DIRECTORY (the modern/custom data the host serves) is still
+     * skipped, so the client never indexes its huge tree into its 32-bit address space; the file-open
+     * detour serves those files from the host instead, same as before this whole detour existed.
+     * Returning 0 reads as an absent optional archive, which every caller already tolerates.
      * @param name      archive path the client is about to mount.
      * @param priority  search priority.
      * @param flags     mount flags.
      * @param out       receives the archive handle on a native mount.
      * @return the native mount result, or 0 when the directory is skipped.
      */
-    int __stdcall ArchiveMountDetour(const char* name, int priority, uint32_t flags, void** out)
+    char __cdecl MopaqOpenArchiveDetour(const char* name, int priority, uint32_t flags, void** out)
     {
         const DWORD attrs = name ? GetFileAttributesA(name) : INVALID_FILE_ATTRIBUTES;
         if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
@@ -522,23 +578,67 @@ namespace
             return 0;
         }
         WLOG_INFO("archive-mount: keep '%s'", name ? name : "(null)");
-        return g_origArchiveMount(name, priority, flags, out);
+        return g_origMopaqOpenArchive(name, priority, flags, out);
+    }
+
+    // Required-archive hard-fail gate (io::kRequiredArchiveGateJnz):
+    // `0F 85 11 01 00 00` (jne 0x4061d4) -> `E9 12 01 00 00 90` (unconditional jmp + 1-byte NOP pad).
+    // Both encodings are 6 bytes so nothing after the patch site needs to move. Kept applied as a harmless
+    // defensive measure even now that real archives mount natively again (turns a corrupted/missing
+    // required archive into a tolerated, logged skip instead of a hard "Failed to open archive" dialog +
+    // exit); originally load-bearing for a since-reverted experiment that blocked native archive mounting.
+    constexpr uint8_t kRequiredGateOriginal[6] = { 0x0F, 0x85, 0x11, 0x01, 0x00, 0x00 };
+    constexpr uint8_t kRequiredGatePatched[6]  = { 0xE9, 0x12, 0x01, 0x00, 0x00, 0x90 };
+
+    /**
+     * @brief Detours InitializeWowConfig: runs the original archive-mount/signature-file/config sequence
+     *        unmodified, then forces the expansion-content-present flag (io::kWotlkContentFlag) on.
+     *
+     * Originally load-bearing for a since-reverted experiment that blocked the expansion archives from
+     * mounting natively (see MopaqOpenArchiveDetour's doc comment); kept installed since real
+     * archives mount natively again now, so the native derivation already produces the same
+     * fully-unlocked value on its own in the normal case -- this is a harmless, idempotent safety net,
+     * not a required fix.
+     */
+    void __cdecl InitializeWowConfigDetour()
+    {
+        g_origInitializeWowConfig();
+        *reinterpret_cast<uint8_t*>(io::kWotlkContentFlag) = 2;
     }
 }
 
 namespace wxl::runtime::storage
 {
     /**
-     * @brief Arms the archive-mount guard, dropping the host-owned loose directories at mount time.
+     * @brief Arms the archive-mount guard, dropping the host-owned loose directories at mount time, plus
+     *        two harmless-by-default safety nets (the required-archive hard-fail gate, the
+     *        expansion-content flag force) kept installed from a since-reverted full-native-mount-block
+     *        experiment.
      *
      * Must run before the client builds its archive set (call it from the DLL entry, on the loader
      * thread, before the client's startup proceeds). Independent of the host connection.
      */
     void InstallArchiveGuard()
     {
-        wxl::core::hook::Install("Storage_ArchiveMount", io::kArchiveMount,
-            reinterpret_cast<void*>(&ArchiveMountDetour),
-            reinterpret_cast<void**>(&g_origArchiveMount));
+        wxl::core::hook::Install("Mopaq_OpenArchive", io::kMopaqOpenArchive,
+            reinterpret_cast<void*>(&MopaqOpenArchiveDetour),
+            reinterpret_cast<void**>(&g_origMopaqOpenArchive));
+
+        wxl::core::hook::Install("InitializeWowConfig", io::kInitializeWowConfig,
+            reinterpret_cast<void*>(&InitializeWowConfigDetour),
+            reinterpret_cast<void**>(&g_origInitializeWowConfig));
+
+        auto* gate = reinterpret_cast<void*>(io::kRequiredArchiveGateJnz);
+        if (memcmp(gate, kRequiredGateOriginal, sizeof kRequiredGateOriginal) == 0)
+        {
+            wxl::core::mem::Patch(gate, kRequiredGatePatched, sizeof kRequiredGatePatched);
+            WLOG_INFO("Storage: required-archive gate patched (boot no longer hard-fails on a blocked mount)");
+        }
+        else
+        {
+            WLOG_INFO("Storage: required-archive gate bytes did not match expected -- NOT patched (build mismatch?)");
+        }
+
         wxl::core::hook::EnableAll();
         WLOG_INFO("Storage: archive-mount guard armed");
     }

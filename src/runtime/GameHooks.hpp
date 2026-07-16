@@ -19,6 +19,13 @@
 namespace wxl::runtime::game
 {
     /**
+     * @brief Installs the disk-queue worker-count extension; must run before the client's own startup
+     *        proceeds (call from the DLL entry, on the loader thread), same timing as the archive-mount
+     *        guard. Enables its own hooks immediately.
+     */
+    void InstallEarly();
+
+    /**
      * @brief Installs the function-entry detours that republish game-logic events.
      *
      * Emits OnModelLoad, OnDoodadSpawn, OnWorldEnter, OnWorldLeave, OnTextureUpload and

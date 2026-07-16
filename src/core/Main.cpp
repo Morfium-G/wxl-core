@@ -86,6 +86,10 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID)
         // there would miss the mount. Drops the host-owned loose directories so the client stays lean.
         wxl::runtime::storage::InstallArchiveGuard();
 
+        // Same timing requirement: the client creates its disk-queue worker thread during this same
+        // early boot window, before the deferred main thread below gets scheduled.
+        wxl::runtime::game::InstallEarly();
+
         // Module boot installers: memory patches that must land before the client's own startup
         // code runs (boot-sized allocations), e.g. the wxl-modern-blp mip-scratch widening.
         wxl::runtime::modules::RunBoot();

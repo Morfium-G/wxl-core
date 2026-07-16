@@ -34,10 +34,37 @@ namespace wxl::offsets::engine::io
     // Close (handle).
     constexpr uintptr_t kFileClose = 0x00422910;
 
-    // Mount one archive (or a loose override directory) into the search chain, the single choke point
-    // every base and patch mount funnels through. (name, priority, flags, &out) -> nonzero on success;
-    // returning 0 reads as an absent optional archive, which the boot path tolerates.
+    // Mount-into-search-chain primitive (boot's own bookkeeping wrapper). Superseded as a hook point by
+    // kMopaqOpenArchive below, which every mount -- including this one -- ultimately calls into; kept as
+    // a landmark, not actively hooked.
     constexpr uintptr_t kArchiveMount = 0x00421950;
+    // The true archive/directory mount primitive: every native mount call in the client (boot's base+
+    // patch table, the per-patch nested "alternate.MPQ" probe, the Survey/patch-download runtime mounts)
+    // funnels through here. (name, priority, flags, &out) -> nonzero on success; returning 0 reads as an
+    // absent optional archive, which every caller already tolerates. NOT __stdcall like kArchiveMount --
+    // this one is __cdecl (caller-cleaned stack).
+    constexpr uintptr_t kMopaqOpenArchive = 0x0045C480;
+    using MopaqOpenArchiveFn = char(__cdecl*)(const char* name, int priority, uint32_t flags, void** out);
+
+    // Second required-archive gate inside kInitializeWowConfig (`jne 0x4061d4`). A failed mount for one of
+    // a small set of rows that are required for this install (common.MPQ, locale-<locale>.MPQ,
+    // speech-<locale>.MPQ) falls through into a hard "Failed to open archive %s." dialog + exit() --
+    // every other row already takes the tolerant "decrement slot, mark handled, continue" path on a
+    // failed mount. Patched to jump unconditionally so a required row gets the same tolerance. Kept
+    // applied as a harmless safety net (a genuinely missing/corrupted required archive is now a logged
+    // skip instead of a hard dialog+exit) even with native mounting otherwise unchanged.
+    constexpr uintptr_t kRequiredArchiveGateJnz = 0x004060BD;
+
+    // Boot's archive-mount + signature-file-check + expansion-tier-flag driver (void, no args). Hooked
+    // "call original, then extend": forces the expansion-content-present flag (kWotlkContentFlag) to its
+    // full value right after the original runs, as a harmless idempotent safety net -- the native
+    // derivation already produces the same value on its own when the expansion archives mount normally.
+    constexpr uintptr_t kInitializeWowConfig = 0x00405DD0;
+    using InitializeWowConfigFn = void(__cdecl*)();
+
+    // Expansion-content-present tri-state (0=classic, 1=TBC, 2=current). The login/realm-select gate and
+    // the Lua client-expansion-level API both read this.
+    constexpr uintptr_t kWotlkContentFlag = 0x00B2F9E1;
 
     // Open flag: load the whole file into the handle buffer.
     constexpr uint32_t  kOpenWholeFile = 0x20000;
