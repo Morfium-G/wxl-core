@@ -75,6 +75,62 @@ namespace
 
     UINT g_customPresentMisses = 0;
 
+    // Mode last successfully applied to the device (create or reset). Lets HookReset recognize a
+    // no-op reset — the engine "restoring" from minimize resets a device whose mode never changed —
+    // and skip the full native On12 rebuild (the bulk of the restore freeze).
+    struct AppliedMode
+    {
+        IDirect3DDevice9* dev      = nullptr;
+        UINT              width    = 0;
+        UINT              height   = 0;
+        BOOL              windowed = FALSE;
+        HWND              window   = nullptr;
+        D3DFORMAT         format   = D3DFMT_UNKNOWN;
+        bool              valid    = false;
+    };
+    AppliedMode g_appliedMode;
+
+    /** @brief Records the mode a create/reset successfully applied. */
+    void RememberAppliedMode(IDirect3DDevice9* dev, const D3DPRESENT_PARAMETERS& pp, HWND fallbackWindow)
+    {
+        g_appliedMode.dev      = dev;
+        g_appliedMode.width    = pp.BackBufferWidth;
+        g_appliedMode.height   = pp.BackBufferHeight;
+        g_appliedMode.windowed = pp.Windowed;
+        g_appliedMode.window   = pp.hDeviceWindow ? pp.hDeviceWindow : fallbackWindow;
+        g_appliedMode.format   = pp.BackBufferFormat;
+        g_appliedMode.valid    = true;
+    }
+
+    /** @brief True when the no-op-reset skip is enabled (default on; WXL_NOOP_RESET=0 disables). */
+    bool NoopResetEnabled()
+    {
+        static const bool enabled = []() {
+            char value[16] = {};
+            const DWORD n = GetEnvironmentVariableA("WXL_NOOP_RESET", value, sizeof(value));
+            if (n && n < sizeof(value))
+            {
+                const char c = value[0];
+                if (c == '0' || c == 'n' || c == 'N' || c == 'f' || c == 'F') return false;
+            }
+            return true;
+        }();
+        return enabled;
+    }
+
+    /** @brief True when a reset to these sanitized params would change nothing on this device. */
+    bool IsNoopReset(IDirect3DDevice9* dev, const D3DPRESENT_PARAMETERS& pp)
+    {
+        return NoopResetEnabled()
+            && g_appliedMode.valid
+            && g_appliedMode.dev == dev
+            && g_appliedMode.windowed && pp.Windowed
+            && g_appliedMode.width == pp.BackBufferWidth
+            && g_appliedMode.height == pp.BackBufferHeight
+            && g_appliedMode.format == pp.BackBufferFormat
+            && g_appliedMode.window == (pp.hDeviceWindow ? pp.hDeviceWindow : g_devWindow);
+    }
+
     HRESULT STDMETHODCALLTYPE HookReset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp);
 
     /**
@@ -275,21 +331,38 @@ namespace
 
         Log("capture: Reset begin %ux%u windowed=%d BBCount=%u",
             pp->BackBufferWidth, pp->BackBufferHeight, pp->Windowed, pp->BackBufferCount);
-        if (!wxl::gpu::present::PrepareForReset())
-        {
-            Log("capture: Reset deferred because proxy GPU work did not drain");
-            return D3DERR_DEVICELOST;
-        }
 
         // Do not rewrite WoW's persistent presentation-parameter block. The engine compares that
         // state later and repeatedly resets the device if our On12-only BBCount/Flags changes leak
         // back into it, producing a brief hide/flicker loop during loading. Sanitize a call copy.
         D3DPRESENT_PARAMETERS sanitized = *pp;
         PrepareNativePresentParams(&sanitized);
+
+        // Restore-from-minimize: WoW believes it owns an exclusive-fullscreen device (only the
+        // native param copy was rewritten to windowed) and "restores" it with a Reset whose
+        // sanitized mode is identical to what the device already runs. The native On12 reset it
+        // would trigger rebuilds the whole swapchain (~1 s frozen frame); skip it entirely,
+        // before even the drain wait — nothing is being replaced.
+        if (IsNoopReset(dev, sanitized))
+        {
+            Log("capture: Reset skipped (no-op: %ux%u windowed hwnd=%p unchanged)",
+                sanitized.BackBufferWidth, sanitized.BackBufferHeight,
+                sanitized.hDeviceWindow ? sanitized.hDeviceWindow : g_devWindow);
+            return S_OK;
+        }
+
+        if (!wxl::gpu::present::PrepareForReset())
+        {
+            Log("capture: Reset deferred because proxy GPU work did not drain");
+            return D3DERR_DEVICELOST;
+        }
+
         g_windowed = sanitized.Windowed;
         if (sanitized.hDeviceWindow) g_devWindow = sanitized.hDeviceWindow;
         const HRESULT hr = h->reset(dev, &sanitized);
         Log("capture: Reset end hr=0x%08lX", (unsigned long)hr);
+        if (SUCCEEDED(hr)) RememberAppliedMode(dev, sanitized, g_devWindow);
+        else               g_appliedMode.valid = false;
         return hr;
     }
 
@@ -391,7 +464,11 @@ namespace
             g_devWindow = native.hDeviceWindow ? native.hDeviceWindow : fw;
             g_windowed  = native.Windowed;
             HRESULT hr = real_->CreateDevice(a, t, fw, bf, &native, ret);
-            if (SUCCEEDED(hr) && ret && *ret) Capture(*ret, queue_);
+            if (SUCCEEDED(hr) && ret && *ret)
+            {
+                Capture(*ret, queue_);
+                RememberAppliedMode(*ret, native, g_devWindow);
+            }
             return hr;
         }
 
@@ -420,7 +497,11 @@ namespace
             g_devWindow = native.hDeviceWindow ? native.hDeviceWindow : fw;
             g_windowed  = native.Windowed;
             HRESULT hr = realEx_->CreateDeviceEx(a, t, fw, bf, &native, native.Windowed ? nullptr : fsm, ret);
-            if (SUCCEEDED(hr) && ret && *ret) Capture(*ret, queue_);
+            if (SUCCEEDED(hr) && ret && *ret)
+            {
+                Capture(*ret, queue_);
+                RememberAppliedMode(*ret, native, g_devWindow);
+            }
             return hr;
         }
         HRESULT STDMETHODCALLTYPE GetAdapterLUID(UINT a, LUID* luid) override { return realEx_ ? realEx_->GetAdapterLUID(a, luid) : E_NOTIMPL; }

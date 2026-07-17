@@ -383,8 +383,10 @@ namespace wxl::gpu::present
         // private queue is still sampling. Bound the wait so a removed/stuck GPU cannot freeze Wow.exe.
         if (g_fence && g_fence->GetCompletedValue() < g_fenceVal)
         {
+            // 1000 ms: a healthy queue drains in single-digit ms; a GPU that needs longer is stuck,
+            // and the engine's DEVICELOST retry loop would compound a 5 s cap into multi-second hangs.
             if (FAILED(g_fence->SetEventOnCompletion(g_fenceVal, g_event)) ||
-                WaitForSingleObject(g_event, 5000) != WAIT_OBJECT_0)
+                WaitForSingleObject(g_event, 1000) != WAIT_OBJECT_0)
             {
                 ID3D12Device* device = wxl::gpu::Device();
                 const HRESULT reason = device ? device->GetDeviceRemovedReason() : E_FAIL;
@@ -413,6 +415,10 @@ namespace wxl::gpu::present
             if (trace) Log("present: rejected null device=%p window=%p", device, window);
             return false;
         }
+        // Minimized: nothing is visible and the composition swapchain retains its last frame, so
+        // skip the whole blit/submit machinery instead of pushing frames into an occluded chain.
+        // Returning true tells the capture hook the present is handled (native present stays off).
+        if (IsIconic(window)) return true;
         if (trace)
         {
             RECT wr{}, cr{};
