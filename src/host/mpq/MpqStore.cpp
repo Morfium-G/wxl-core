@@ -442,6 +442,49 @@ namespace wxl::host::mpq
         return false;
     }
 
+    Source MpqStore::LocateAndRead(std::string_view rawName, bool readStandard,
+                                   std::vector<uint8_t>& out) const
+    {
+        const std::string name = NormalizeName(rawName);
+
+        // Loose override folders win over the archives; the open doubles as the presence test.
+        for (const std::string& lr : m_looseRoots)
+        {
+            std::ifstream f(lr + name, std::ios::binary | std::ios::ate);
+            if (!f) continue;
+            std::streamoff size = f.tellg();
+            f.seekg(0);
+            out.resize(static_cast<size_t>(size));
+            if (size) f.read(reinterpret_cast<char*>(out.data()), size);
+            return Source::Loose;
+        }
+
+        for (size_t i = 0; i < m_archives.size(); ++i)
+        {
+            std::lock_guard<std::mutex> lock(*m_archiveLocks[i]);
+            HANDLE hFile = nullptr;
+            if (!SFileOpenFileEx(static_cast<HANDLE>(m_archives[i]), name.c_str(), 0, &hFile) || !hFile) continue;
+            const Source source = m_archiveIsExtra[i] ? Source::Extra : Source::Standard;
+            if (source == Source::Standard && !readStandard)
+            {
+                SFileCloseFile(hFile);
+                return source; // caller answers native-skip without paying the read
+            }
+            DWORD high = 0;
+            DWORD sz = SFileGetFileSize(hFile, &high);
+            if (sz == SFILE_INVALID_SIZE) { SFileCloseFile(hFile); continue; }
+            out.resize(sz);
+            if (sz)
+            {
+                DWORD read = 0;
+                SFileReadFile(hFile, out.data(), sz, &read, nullptr); // FALSE at exact EOF is fine
+            }
+            SFileCloseFile(hFile);
+            return source;
+        }
+        return Source::None;
+    }
+
     Source MpqStore::Locate(std::string_view rawName) const
     {
         const std::string name = NormalizeName(rawName);

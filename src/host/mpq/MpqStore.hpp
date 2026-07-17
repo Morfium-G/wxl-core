@@ -92,6 +92,20 @@ namespace wxl::host::mpq
          */
         Source Locate(std::string_view name) const;
 
+        /**
+         * @brief Locates and reads `name` in ONE walk of the mounted set.
+         *
+         * Locate-then-ReadAll walks (and locks) every archive twice per served file; this fuses
+         * them: the first source that has the file wins, and its bytes are read in place — except
+         * a Standard hit with readStandard=false, which reports the source without reading so the
+         * caller can hand the open to the client's native archives (the native-skip fast path).
+         * @param name          file name to read
+         * @param readStandard  false to skip reading bytes from a Standard (stock) archive hit
+         * @param out           receives the file bytes (untouched on None / unread Standard)
+         * @return the winning source kind, or Source::None
+         */
+        Source LocateAndRead(std::string_view name, bool readStandard, std::vector<uint8_t>& out) const;
+
         /** @brief Closes all open archive handles. */
         ~MpqStore();
 
