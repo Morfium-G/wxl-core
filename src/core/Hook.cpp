@@ -52,7 +52,7 @@ namespace wxl::core::hook
             WLOG_ERROR("hook: create '%s' @0x%p failed (%s)", name, target, MH_StatusToString(s));
             return false;
         }
-        WLOG_INFO("hook: installed '%s' @0x%p", name, target);
+        WLOG_DEBUG("hook: installed '%s' @0x%p", name, target);
         return true;
     }
 
@@ -64,7 +64,7 @@ namespace wxl::core::hook
             WLOG_ERROR("hook: enable @0x%p failed (%s)", target, MH_StatusToString(s));
             return false;
         }
-        WLOG_INFO("hook: enabled early @0x%p", target);
+        WLOG_DEBUG("hook: enabled early @0x%p", target);
         return true;
     }
 

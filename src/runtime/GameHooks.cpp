@@ -410,7 +410,7 @@ namespace
                         std::lock_guard<std::mutex> lock(g_virtualM2AllocMutex);
                         g_virtualM2Allocs.emplace(ptr, VirtualM2Allocation{ nullptr, offset, need });
                     }
-                    WLOG_INFO("m2-memory: arena buffer %u bytes (%s)", size, tag ? tag : "M2");
+                    WLOG_DEBUG("m2-memory: arena buffer %u bytes (%s)", size, tag ? tag : "M2");
                     if (size >= 8u * 1024u * 1024u) LogClientAddressSpace("m2-arena");
                     return ptr;
                 }
@@ -420,7 +420,7 @@ namespace
 
             if (void* standalone = TryVirtualM2Alloc(size))
             {
-                WLOG_INFO("m2-memory: virtual buffer %u bytes (%s)", size, tag ? tag : "M2");
+                WLOG_DEBUG("m2-memory: virtual buffer %u bytes (%s)", size, tag ? tag : "M2");
                 if (size >= 8u * 1024u * 1024u) LogClientAddressSpace("m2-virtual");
                 return standalone;
             }
