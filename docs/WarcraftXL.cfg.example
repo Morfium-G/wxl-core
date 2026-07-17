@@ -1,0 +1,77 @@
+# WarcraftXL.cfg — WarcraftXL user configuration.
+#
+# Location: next to Wow.exe (client root). All four binaries read it (WarcraftXL.dll,
+# d3d9.dll, wxl-patcher.exe, WarcraftXLHost.exe — the host also looks one directory
+# above its Utils\ folder).
+#
+# Format: KEY=value, one per line. '#' or ';' starts a comment. Spaces are tolerated.
+# Priority: environment variable > this file > sentinel file (.disable) > default.
+# Booleans: 0/n/f = no, anything else = yes.
+#
+# Every key below is shown COMMENTED with its default value:
+# uncomment a line to take control of that knob.
+
+# ----------------------------------------------------------------------------- Logging
+# Verbosity (trace|debug|info|warn|error|off). `debug` re-enables the per-event
+# diagnostics (model loads, served opens, ...) without recompiling.
+#WXL_LOG_LEVEL=info
+# Flush the buffer after every line (crash diagnostics; costly).
+#WXL_LOG_FLUSH=0
+# Mirror every line to OutputDebugString (default: on when a debugger is attached).
+#WXL_LOG_DEBUGSTRING=0
+
+# ----------------------------------------------------------------------------- Rendering (d3d9.dll)
+# Disable the D3D9On12 redirection entirely (pure native pass-through).
+#WXL_NO_ON12=0
+# Allow true exclusive fullscreen instead of the enforced borderless (unstable On12 resets).
+#WXL_EXCLUSIVE_FULLSCREEN=0
+# Skip device Resets that change nothing (set 0 to restore the native behavior).
+#WXL_NOOP_RESET=1
+
+# ----------------------------------------------------------------------------- M2 memory (client)
+# Dedicated allocator for large model buffers (VirtualAlloc arena).
+#WXL_M2_ARENA=1
+#WXL_M2_ARENA_MB=128
+# Route M2 allocations above the threshold to VirtualAlloc (MB takes priority over KB).
+#WXL_M2_VIRTUAL_ALLOC=1
+#WXL_M2_VIRTUAL_ALLOC_THRESHOLD_MB=1
+#WXL_M2_VIRTUAL_ALLOC_THRESHOLD_KB=1024
+
+# ----------------------------------------------------------------------------- Storage / streaming (client)
+# Read-ahead windows over large streamed files.
+#WXL_STREAM_READAHEAD=1
+# Stream (instead of whole-load) large models / sounds / textures.
+#WXL_STREAM_WHOLE_LARGE_M2=1
+#WXL_STREAM_SOUNDS=1
+#WXL_STREAM_TEXTURES=1
+# Streaming cutover thresholds (MB takes priority, then KB).
+#WXL_STREAM_MODEL_THRESHOLD_KB=512
+#WXL_STREAM_SOUND_THRESHOLD_KB=256
+#WXL_STREAM_TEXTURE_THRESHOLD_KB=512
+# Log every served/missed open (storage debug mode).
+#WXL_VERBOSE_ASSET_LOGS=0
+
+# ----------------------------------------------------------------------------- Host (WarcraftXLHost.exe)
+# Worker thread count (default: channels-1, bounded by the machine).
+#WXL_HOST_WORKERS=0
+# Also serve files from the stock archives (instead of letting the client read them natively).
+#WXL_HOST_SERVE_NATIVE=0
+# Trace every open on the host console (requires --console / WarcraftXLConsole.flag).
+#WXL_HOST_CONSOLE_OPENS=0
+# Modern-assets transform cache: total size and per-entry cap.
+#WXL_TRANSFORM_CACHE_MB=512
+#WXL_TRANSFORM_CACHE_ENTRY_MB=64
+
+# ----------------------------------------------------------------------------- Profilers
+# Client: asset phases + frame-hitch histogram (h25/h50/h100).
+#WXL_CLIENT_ASSET_PROFILE=1
+#WXL_CLIENT_ASSET_PROFILE_INTERVAL_SEC=30
+#WXL_CLIENT_ASSET_SLOW_MS=25
+# Client: IPC latencies toward the host.
+#WXL_IPC_PROFILE=1
+#WXL_IPC_PROFILE_INTERVAL_SEC=30
+#WXL_IPC_SLOW_REQUEST_MS=25
+# Host: per-request archive/transform/blob split + slowest-opens top list.
+#WXL_HOST_PROFILE=1
+#WXL_HOST_PROFILE_INTERVAL_SEC=30
+#WXL_HOST_SLOW_REQUEST_MS=25

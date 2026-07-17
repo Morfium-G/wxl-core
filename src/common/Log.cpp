@@ -16,6 +16,8 @@
 
 #include "common/Log.hpp"
 
+#include "common/Config.hpp"
+
 #include <windows.h>
 #include <atomic>
 #include <cstdio>
@@ -34,30 +36,23 @@ namespace
     bool              g_console = false;
     char              g_consolePrefix[32] = {};
 
-    bool EnvEnabled(const char* name, bool fallback)
-    {
-        const char* raw = std::getenv(name);
-        if (!raw || !*raw) return fallback;
-        return !(*raw == '0' || *raw == 'n' || *raw == 'N');
-    }
-
     bool FlushEveryLine()
     {
-        static const bool enabled = EnvEnabled("WXL_LOG_FLUSH", false);
+        static const bool enabled = wxl::config::Env("WXL_LOG_FLUSH", false);
         return enabled;
     }
 
     bool DebugStringEnabled()
     {
-        static const bool enabled = EnvEnabled("WXL_LOG_DEBUGSTRING", IsDebuggerPresent() != 0);
+        static const bool enabled = wxl::config::Env("WXL_LOG_DEBUGSTRING", IsDebuggerPresent() != 0);
         return enabled;
     }
 
     /** @brief Parses WXL_LOG_LEVEL ("debug", "warn", "2", ...) once; Info when absent/garbled. */
     Level LevelFromEnv()
     {
-        const char* raw = std::getenv("WXL_LOG_LEVEL");
-        if (!raw || !*raw) return Level::Info;
+        char raw[16] = {};
+        if (!wxl::config::Raw("WXL_LOG_LEVEL", raw, sizeof raw)) return Level::Info;
         if (*raw >= '0' && *raw <= '5') return static_cast<Level>(*raw - '0');
         switch (*raw | 0x20)
         {

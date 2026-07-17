@@ -16,6 +16,7 @@
 
 #include "Host.hpp"
 
+#include "common/Config.hpp"
 #include "core/Logger.hpp"
 
 #if defined(_WIN32)
@@ -529,12 +530,7 @@ namespace wxl::host
     /** @brief Reports whether per-hook profiling is enabled by the environment (default on). */
     bool ProfilingEnabled()
     {
-        static const bool enabled = []
-        {
-            const char* raw = std::getenv("WXL_HOST_PROFILE");
-            if (!raw || !*raw) return true;
-            return !(*raw == '0' || *raw == 'n' || *raw == 'N' || *raw == 'f' || *raw == 'F');
-        }();
+        static const bool enabled = wxl::config::Env("WXL_HOST_PROFILE", true);
         return enabled;
     }
 

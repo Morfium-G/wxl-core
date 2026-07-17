@@ -16,6 +16,7 @@
 
 #include "runtime/RenderHooks.hpp"
 
+#include "common/Mem.hpp"
 #include "core/Hook.hpp"
 #include "core/Logger.hpp"
 #include "events/Event.hpp"
@@ -862,11 +863,7 @@ namespace
      */
     void SwapVtbl(void** vtbl, unsigned idx, void* hook, void** origOut)
     {
-        DWORD old;
-        VirtualProtect(&vtbl[idx], sizeof(void*), PAGE_EXECUTE_READWRITE, &old);
-        *origOut = vtbl[idx];
-        vtbl[idx] = hook;
-        VirtualProtect(&vtbl[idx], sizeof(void*), old, &old);
+        wxl::mem::SwapPointer(&vtbl[idx], hook, origOut);
     }
 
     /**

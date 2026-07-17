@@ -16,6 +16,7 @@
 
 #include "runtime/storage/ShmClient.hpp"
 
+#include "common/Config.hpp"
 #include "core/Logger.hpp"
 #include "events/Event.hpp"
 #include "host/ipc/Protocol.hpp"

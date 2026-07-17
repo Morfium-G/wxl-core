@@ -35,6 +35,15 @@ namespace wxl::config
     bool Truthy(const char* raw, bool fallback);
 
     /**
+     * @brief Copies a knob's raw string value into buf: environment first, then WarcraftXL.cfg.
+     * @param name  knob name (the WXL_* key).
+     * @param buf   receives the NUL-terminated value.
+     * @param cap   buffer capacity.
+     * @return true when a non-empty value was found and fits.
+     */
+    bool Raw(const char* name, char* buf, size_t cap);
+
+    /**
      * @brief Reads a boolean environment variable.
      * @param name      environment variable name.
      * @param fallback  result when the variable is absent or empty.

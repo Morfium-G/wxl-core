@@ -17,19 +17,70 @@
 #include "common/Config.hpp"
 
 #include <windows.h>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 namespace
 {
     /**
-     * @brief Reads an environment variable into a small buffer.
-     * @return true when present and non-empty.
+     * @brief The optional user config file, parsed once per process.
+     *
+     * Plain "KEY=value" lines, '#' comments, spaces trimmed. Looked up AFTER the environment (an
+     * env var always wins) and BEFORE sentinel files/defaults. Searched in the working directory
+     * (the client root for the DLL/proxy/patcher) then one level up (the host runs from Utils\).
+     * Config.wtf stays reserved for real engine CVars; this file covers all four binaries.
+     */
+    const std::unordered_map<std::string, std::string>& CfgFile()
+    {
+        static const std::unordered_map<std::string, std::string> entries = [] {
+            std::unordered_map<std::string, std::string> map;
+            FILE* f = nullptr;
+            if (fopen_s(&f, "WarcraftXL.cfg", "rb") != 0 || !f)
+                if (fopen_s(&f, "..\\WarcraftXL.cfg", "rb") != 0 || !f)
+                    return map;
+            char line[512];
+            while (fgets(line, sizeof line, f))
+            {
+                char* text = line;
+                while (*text == ' ' || *text == '\t') ++text;
+                if (*text == '#' || *text == ';' || *text == '\0') continue;
+                char* eq = std::strchr(text, '=');
+                if (!eq) continue;
+                char* keyEnd = eq;
+                while (keyEnd > text && (keyEnd[-1] == ' ' || keyEnd[-1] == '\t')) --keyEnd;
+                char* value = eq + 1;
+                while (*value == ' ' || *value == '\t') ++value;
+                char* valueEnd = value + std::strlen(value);
+                while (valueEnd > value && (valueEnd[-1] == '\n' || valueEnd[-1] == '\r'
+                                         || valueEnd[-1] == ' '  || valueEnd[-1] == '\t')) --valueEnd;
+                if (keyEnd > text)
+                    map.emplace(std::string(text, keyEnd), std::string(value, valueEnd));
+            }
+            fclose(f);
+            return map;
+        }();
+        return entries;
+    }
+
+    /**
+     * @brief Resolves a knob's raw value: environment first, then the WarcraftXL.cfg file.
+     * @return true when a non-empty value was found and copied into buf.
      */
     bool ReadEnv(const char* name, char* buf, DWORD cap)
     {
         if (!name) return false;
         const DWORD n = GetEnvironmentVariableA(name, buf, cap);
-        return n > 0 && n < cap;
+        if (n > 0 && n < cap) return true;
+
+        const auto& cfg = CfgFile();
+        const auto it = cfg.find(name);
+        if (it == cfg.end() || it->second.empty() || it->second.size() + 1 > cap) return false;
+        std::memcpy(buf, it->second.c_str(), it->second.size() + 1);
+        return true;
     }
 }
 
@@ -40,6 +91,11 @@ namespace wxl::config
         if (!raw || !*raw) return fallback;
         const char c = *raw;
         return !(c == '0' || c == 'n' || c == 'N' || c == 'f' || c == 'F');
+    }
+
+    bool Raw(const char* name, char* buf, size_t cap)
+    {
+        return ReadEnv(name, buf, static_cast<DWORD>(cap));
     }
 
     bool Env(const char* name, bool fallback)

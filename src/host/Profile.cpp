@@ -9,6 +9,7 @@
 #include "Profile.hpp"
 
 #include "Host.hpp"
+#include "common/Config.hpp"
 #include "core/Logger.hpp"
 
 #include <windows.h>
@@ -70,27 +71,17 @@ namespace wxl::host::profile
             OpenTrace open{};
         };
 
-        uint64_t EnvU64(const char* name, uint64_t fallback, uint64_t minValue, uint64_t maxValue)
-        {
-            const char* raw = std::getenv(name);
-            if (!raw || !*raw) return fallback;
-            char* end = nullptr;
-            uint64_t value = std::strtoull(raw, &end, 10);
-            if (end == raw) return fallback;
-            return std::clamp(value, minValue, maxValue);
-        }
-
         uint32_t IntervalSeconds()
         {
-            static const uint32_t seconds = static_cast<uint32_t>(
-                EnvU64("WXL_HOST_PROFILE_INTERVAL_SEC", 30, 5, 600));
+            static const uint32_t seconds =
+                wxl::config::U32("WXL_HOST_PROFILE_INTERVAL_SEC", 30, 5, 600);
             return seconds;
         }
 
         uint32_t SlowRequestMs()
         {
-            static const uint32_t ms = static_cast<uint32_t>(
-                EnvU64("WXL_HOST_SLOW_REQUEST_MS", 25, 1, 60000));
+            static const uint32_t ms =
+                wxl::config::U32("WXL_HOST_SLOW_REQUEST_MS", 25, 1, 60000);
             return ms;
         }
 

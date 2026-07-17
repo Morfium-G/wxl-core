@@ -92,30 +92,10 @@ namespace
     size_t g_transformCacheBytes = 0;
     std::mutex g_profileMutex;
 
-    bool EnvTruthy(const char* raw)
-    {
-        if (!raw || !*raw) return false;
-        const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(*raw)));
-        return c != '0' && c != 'n' && c != 'f';
-    }
-
-    uint64_t EnvU64(const char* name, uint64_t fallback, uint64_t minValue, uint64_t maxValue)
-    {
-        const char* raw = std::getenv(name);
-        if (!raw || !*raw) return fallback;
-
-        char* end = nullptr;
-        uint64_t value = std::strtoull(raw, &end, 10);
-        if (end == raw) return fallback;
-        if (value < minValue) return minValue;
-        if (value > maxValue) return maxValue;
-        return value;
-    }
-
     size_t TransformCacheMaxBytes()
     {
         static const size_t bytes = static_cast<size_t>(
-            EnvU64("WXL_TRANSFORM_CACHE_MB", 512, 32, 8192) * 1024ull * 1024ull);
+            wxl::config::U64("WXL_TRANSFORM_CACHE_MB", 512, 32, 8192) * 1024ull * 1024ull);
         return bytes;
     }
 
@@ -124,7 +104,7 @@ namespace
     size_t TransformCacheMaxEntry()
     {
         static const size_t bytes = static_cast<size_t>(
-            EnvU64("WXL_TRANSFORM_CACHE_ENTRY_MB", 64, 1, 512) * 1024ull * 1024ull);
+            wxl::config::U64("WXL_TRANSFORM_CACHE_ENTRY_MB", 64, 1, 512) * 1024ull * 1024ull);
         return bytes;
     }
 
@@ -135,13 +115,13 @@ namespace
     bool g_serveNativeForced = false; // --provide dumps must resolve native content too
     bool ServeNativeArchives()
     {
-        static const bool enabled = EnvTruthy(std::getenv("WXL_HOST_SERVE_NATIVE"));
+        static const bool enabled = wxl::config::Env("WXL_HOST_SERVE_NATIVE", false);
         return enabled || g_serveNativeForced;
     }
 
     bool ConsoleOpenLogRequested()
     {
-        if (EnvTruthy(std::getenv("WXL_HOST_CONSOLE_OPENS"))) return true;
+        if (wxl::config::Env("WXL_HOST_CONSOLE_OPENS", false)) return true;
         const std::string root = ClientRoot();
         if (root.empty()) return false;
         return GetFileAttributesA((root + "\\WarcraftXLConsoleOpens.flag").c_str()) != INVALID_FILE_ATTRIBUTES;

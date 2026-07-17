@@ -19,6 +19,7 @@
 #include "gpu/Present.hpp"
 
 #include "common/Config.hpp"
+#include "common/Mem.hpp"
 
 #include <windows.h>
 
@@ -213,21 +214,13 @@ namespace
         rec.dev = dev;
         rec.vt  = vt;
 
-        DWORD old = 0;
-        VirtualProtect(&vt[kVtEndScene], sizeof(void*), PAGE_EXECUTE_READWRITE, &old);
-        rec.endScene = reinterpret_cast<EndSceneFn>(vt[kVtEndScene]);
-        vt[kVtEndScene] = reinterpret_cast<void*>(&HookEndScene);
-        VirtualProtect(&vt[kVtEndScene], sizeof(void*), old, &old);
-
-        VirtualProtect(&vt[kVtPresent], sizeof(void*), PAGE_EXECUTE_READWRITE, &old);
-        rec.present = reinterpret_cast<PresentFn>(vt[kVtPresent]);
-        vt[kVtPresent] = reinterpret_cast<void*>(&HookPresent);
-        VirtualProtect(&vt[kVtPresent], sizeof(void*), old, &old);
-
-        VirtualProtect(&vt[kVtReset], sizeof(void*), PAGE_EXECUTE_READWRITE, &old);
-        rec.reset = reinterpret_cast<ResetFn>(vt[kVtReset]);
-        vt[kVtReset] = reinterpret_cast<void*>(&HookReset);
-        VirtualProtect(&vt[kVtReset], sizeof(void*), old, &old);
+        void* prev = nullptr;
+        wxl::mem::SwapPointer(&vt[kVtEndScene], reinterpret_cast<void*>(&HookEndScene), &prev);
+        rec.endScene = reinterpret_cast<EndSceneFn>(prev);
+        wxl::mem::SwapPointer(&vt[kVtPresent], reinterpret_cast<void*>(&HookPresent), &prev);
+        rec.present = reinterpret_cast<PresentFn>(prev);
+        wxl::mem::SwapPointer(&vt[kVtReset], reinterpret_cast<void*>(&HookReset), &prev);
+        rec.reset = reinterpret_cast<ResetFn>(prev);
 
         RememberHooks(rec);
     }

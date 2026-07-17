@@ -8,6 +8,7 @@
 
 #include "runtime/AssetProfile.hpp"
 
+#include "common/Config.hpp"
 #include "core/Logger.hpp"
 
 #include <windows.h>
@@ -59,32 +60,14 @@ namespace wxl::runtime::assetprof
         SRWLOCK g_lock = SRWLOCK_INIT;
         Window g_window;
 
-        bool ReadEnvU32(const char* name, uint32_t minValue, uint32_t maxValue, uint32_t& out)
-        {
-            char raw[32];
-            const DWORD n = GetEnvironmentVariableA(name, raw, static_cast<DWORD>(sizeof(raw)));
-            if (!n || n >= sizeof(raw)) return false;
-            char* end = nullptr;
-            const unsigned long value = std::strtoul(raw, &end, 10);
-            if (end == raw || *end != '\0' || value < minValue || value > maxValue) return false;
-            out = static_cast<uint32_t>(value);
-            return true;
-        }
-
         const Config& GetConfig()
         {
             static const Config config = [] {
                 Config c;
-                char enabled[16];
-                const DWORD n = GetEnvironmentVariableA(
-                    "WXL_CLIENT_ASSET_PROFILE", enabled, static_cast<DWORD>(sizeof(enabled)));
-                if (n && n < sizeof(enabled))
-                {
-                    const int first = std::tolower(static_cast<unsigned char>(enabled[0]));
-                    if (first == '0' || first == 'n' || first == 'f') c.enabled = false;
-                }
-                ReadEnvU32("WXL_CLIENT_ASSET_PROFILE_INTERVAL_SEC", 5, 600, c.intervalSeconds);
-                ReadEnvU32("WXL_CLIENT_ASSET_SLOW_MS", 1, 60000, c.slowMs);
+                c.enabled = wxl::config::Env("WXL_CLIENT_ASSET_PROFILE", c.enabled);
+                c.intervalSeconds =
+                    wxl::config::U32("WXL_CLIENT_ASSET_PROFILE_INTERVAL_SEC", c.intervalSeconds, 5, 600);
+                c.slowMs = wxl::config::U32("WXL_CLIENT_ASSET_SLOW_MS", c.slowMs, 1, 60000);
 
                 LARGE_INTEGER frequency{};
                 if (QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0)
