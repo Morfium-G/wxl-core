@@ -104,14 +104,23 @@ namespace wxl::offsets::game::db2
 
     // -------------------------------------------------------------------------
     // ChrRaces DBC. Compacted storage indexed by (id - minId). The ClientPrefix field at +0x18 is
-    // a 4-char race code (e.g. "Hum", "Orc") used to build model paths.
+    // a POINTER to a NUL-terminated 2-char race code string (e.g. "Hu", "Or") used to build model
+    // paths -- dereference it, don't read inline bytes.
+    //
+    // Corrected 2026-08-14, twice: first documented as an embedded NUL-terminated char[4] ("Hum",
+    // "Orc") -- wrong on both the width (it's 2 chars) and the "embedded" part. Verified via fresh
+    // disassembly of sub_4e7800 (the native head-model path builder, `CGItemComponentPathBuilder::
+    // BuildItemHeadObjectComponentPath`): `mov eax, [chrRec+0x18]` loads a pointer, then a
+    // byte-copy loop reads `*eax`, `*(eax+1)`, ... until a NUL. So: `*(const char**)(chrRec+0x18)`
+    // gives a normal, already-NUL-terminated C string -- one dereference, not raw bytes at the
+    // offset itself.
     // -------------------------------------------------------------------------
     namespace chrraces
     {
         constexpr uintptr_t kMinId          = 0x00AD3438; // i32 minimum race id in the table
         constexpr uintptr_t kMaxId          = 0x00AD3434; // i32 maximum race id
         constexpr uintptr_t kIdTable        = 0x00AD3448; // record* table, indexed by (id - minId)
-        constexpr size_t    kOffRecordPrefix= 0x18;       // char[4] race client prefix (e.g. "Hum")
+        constexpr size_t    kOffRecordPrefix= 0x18;       // char* -> NUL-terminated 2-char race code (e.g. "Hu")
     }
 
     // -------------------------------------------------------------------------
@@ -130,7 +139,10 @@ namespace wxl::offsets::game::db2
         using LookupFn = uint32_t (__fastcall*)(void* storageObj, void* edx, uint32_t displayId, void* outBuf);
 
         // Field offsets within the resolved record pointer (byte offsets from the record base).
-        constexpr size_t kOffModel1     = 0x04; // char* primary model filename (no path, no extension)
+        // Corrected 2026-08-14: Model1/Model2 DO include their own extension (".mdx") -- confirmed
+        // in-client (a consumer that appended its own extension without stripping the existing one
+        // produced a double-extensioned path). Previously documented as "no extension" here, wrong.
+        constexpr size_t kOffModel1     = 0x04; // char* primary model filename (no path, WITH extension)
         constexpr size_t kOffModel2     = 0x08; // char* secondary model filename (left/right variant)
         constexpr size_t kOffTex1       = 0x0C; // char* primary texture name
         constexpr size_t kOffTex2       = 0x10; // char* secondary texture name
