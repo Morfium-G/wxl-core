@@ -70,3 +70,9 @@ Testing/
 
 # internal
 tools/
+
+# Extensions live in their own separately-versioned repos (see ../modules/<name>/ and
+# ../CLAUDE.md). What's under extensions/ here is a local, machine-specific directory junction
+# into one of those repos so core's CMake glob can find it -- not something this fork's history
+# should track.
+/extensions/
