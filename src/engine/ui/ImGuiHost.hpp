@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <cstddef>
+
 namespace wxl::ui
 {
     /// A panel body. Called between NewFrame and Render, only while the overlay is open, so it may
@@ -59,5 +61,6 @@ namespace wxl::ui
         void __cdecl SameLine();
         int  __cdecl Combo(const char* label, int* index, const char* const* items, int count);
         int  __cdecl CollapsingHeader(const char* label);
+        int  __cdecl InputText(const char* label, char* buf, size_t bufSize);
     }
 }

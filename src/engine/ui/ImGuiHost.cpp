@@ -265,6 +265,12 @@ namespace wxl::ui
 
         int __cdecl CollapsingHeader(const char* label)
         { return (label && ImGui::CollapsingHeader(label)) ? 1 : 0; }
+
+        int __cdecl InputText(const char* label, char* buf, size_t bufSize)
+        {
+            if (!label || !buf || bufSize == 0) return 0;
+            return ImGui::InputText(label, buf, bufSize) ? 1 : 0;
+        }
     }
 }
 

@@ -17,6 +17,7 @@
 #ifndef WXL_PLUGIN_API_H
 #define WXL_PLUGIN_API_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 // The only file shared verbatim between the core and an extension. The SDK (wxl::game) is
@@ -239,6 +240,18 @@ typedef struct WXL_Api
     /// Draws a section header the reader can fold away. Non-zero while it is open, which is when the
     /// caller should draw the section's body.
     int(__cdecl* UiCollapsingHeader)(const char* label);
+
+    /**
+     * @brief Draws a single-line text field bound to the caller's buffer.
+     *
+     * Appended after the fields above -- check structSize before reading it if built against an
+     * older copy of this header may be a possibility (see the struct's own doc comment).
+     * @param buf      read for the current text and written in place when it changes; always left
+     *                 NUL-terminated within bufSize.
+     * @param bufSize  capacity of @p buf, terminator included.
+     * @return non-zero on the frame the text changes.
+     */
+    int(__cdecl* UiInputText)(const char* label, char* buf, size_t bufSize);
 } WXL_Api;
 
 /// The two entry points as the core resolves them, by name, out of a loaded extension.

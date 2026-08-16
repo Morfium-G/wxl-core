@@ -163,6 +163,7 @@ namespace wxl::runtime::extensions
             &wxl::ui::c::SameLine,
             &wxl::ui::c::Combo,
             &wxl::ui::c::CollapsingHeader,
+            &wxl::ui::c::InputText,
         };
 
         // --- loading --------------------------------------------------------------------------
