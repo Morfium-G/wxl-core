@@ -200,7 +200,7 @@ namespace wxl::events
      */
     struct WmoGroupLoadArgs  { void* group; };
     /** @brief Args for OnTextureUpload. */
-    struct TextureUploadArgs { void* pendingUpdate; };
+    struct TextureUploadArgs { void* texture; uint32_t width; uint32_t height; };
     /**
      * @brief Args for OnBlpLoad, fired after a by-name texture request resolves. name is the full virtual
      *        path requested (match case-insensitively, slash-normalized); handle is the resolved texture

@@ -42,11 +42,11 @@ namespace
     // Keep SEH in a POD-only leaf. TextureUpdate invokes the texture's completion callback before it
     // returns; a late font-atlas/cache callback can retain a row/tree pointer whose owner was rebuilt
     // during world entry. Letting that AV escape kills the client from inside the texture completion callback.
-    bool SafeTextureUpdate(void* pendingUpdate) noexcept
+    bool SafeTextureUpdate(void* tex, int x, int y, int x2, int y2, int flag) noexcept
     {
         __try
         {
-            g_origTexUpdate(pendingUpdate);
+            g_origTexUpdate(tex, x, y, x2, y2, flag);
             return true;
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
@@ -58,10 +58,8 @@ namespace
     /**
      * @brief Detours texture upload, emitting OnTextureUpload before the device update.
      *
-     * The one argument is what the client's own call sites pass: the object its rectangle lookup
-     * returned, which carries the texture and the rectangle together. Nothing here can name a width or
-     * a height without opening that object, and inventing them off the stack is how a fault in this
-     * very function came to be reported as an overrun of a rectangle nobody had asked for.
+     * The native function reads six stack arguments at 0x00681F20: the texture, rectangle and flag.
+     * width=x2-x and height=y2-y cover both full-surface and sub-rectangle uploads.
      *
      * The mip source the upload reads is a process-wide singleton (kMipTablePtr is a pointer whose
      * buffer holds the per-mip source pointers; kMipTableValid gates the read). A build fills it with
@@ -75,24 +73,33 @@ namespace
      *    driven upload would read a prior build's freed alias left in a high slot. Clearing the table
      *    after each upload leaves the next build's unfilled slots at 0, which the upload's source-not-null
      *    blit guard skips. Done after the original consumed the table, so the live upload is unaffected.
-     * @param pendingUpdate the texture-and-rectangle pair the client is sending.
+     * @param tex   texture being uploaded.
+     * @param x     upload rectangle left.
+     * @param y     upload rectangle top.
+     * @param x2    upload rectangle right.
+     * @param y2    upload rectangle bottom.
+     * @param flag  native upload flag.
      */
-    void __cdecl hkTexUpdate(void* pendingUpdate)
+    void __cdecl hkTexUpdate(void* tex, int x, int y, int x2, int y2, int flag)
     {
-        ev::TextureUploadArgs a{ pendingUpdate };
+        ev::TextureUploadArgs a{
+            tex, static_cast<uint32_t>(x2 - x), static_cast<uint32_t>(y2 - y)
+        };
         ev::Emit(ev::Event::OnTextureUpload, &a);
         const uint64_t started = aprof::Now();
-        const bool completed = SafeTextureUpdate(pendingUpdate);
+        const bool completed = SafeTextureUpdate(tex, x, y, x2, y2, flag);
         if (!completed)
         {
             const uint32_t faults = g_textureUpdateFaults.fetch_add(1, std::memory_order_relaxed) + 1;
             if (faults == 1 || (faults & (faults - 1)) == 0)
-                WLOG_WARN("texture: a native upload faulted and was skipped (faults=%u pending=%p)",
-                          faults, pendingUpdate);
+                WLOG_WARN("texture: skipped stale native upload callback (faults=%u tex=%p "
+                          "rect=%d,%d..%d,%d)", faults, tex, x, y, x2, y2);
         }
         else if (started)
         {
-            aprof::Record(aprof::Phase::TextureUpload, aprof::Now() - started, 0);
+            const uint64_t width = x2 > x ? static_cast<uint64_t>(x2 - x) : 0;
+            const uint64_t height = y2 > y ? static_cast<uint64_t>(y2 - y) : 0;
+            aprof::Record(aprof::Phase::TextureUpload, aprof::Now() - started, width * height);
         }
         if (auto* tbl = *reinterpret_cast<uint32_t**>(gxoff::kMipTablePtr))
             std::memset(tbl, 0, gxoff::kMipTableSlots * sizeof(uint32_t));

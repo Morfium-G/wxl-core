@@ -235,15 +235,10 @@ namespace wxl::offsets::engine::gx
     constexpr uintptr_t kGxTexSetWrap = 0x00681450;
     using GxTexSetWrapFn = void(__cdecl*)(void* gxTex, int wrapU, int wrapV);
 
-    // Central texture-data upload to the device. The single __cdecl choke point all upload paths
-    // funnel through.
+    // Central texture-data upload to the device (deviceTex, x, y, x2, y2, flag). Full-surface uploads
+    // pass (tex, 0, 0, width, height, 1), so width = x2 - x and height = y2 - y.
     constexpr uintptr_t kTextureUpdate = 0x00681F20;
-    /// One argument, which is what every one of its twenty-one call sites in the client passes: the
-    /// object the rectangle lookup returned, carrying both the texture and the rectangle. Declaring
-    /// more than that does not read more, it reads the caller's leftovers off the stack -- which for a
-    /// character sheet spells out the arguments of the lookup made just before it, a plausible-looking
-    /// rectangle that was never asked for.
-    using TextureUpdateFn = void(__cdecl*)(void* pendingUpdate);
+    using TextureUpdateFn = void(__cdecl*)(void* deviceTex, int x, int y, int x2, int y2, int flag);
 
     // Central by-name texture create API (__cdecl). The single choke point all texture requests funnel
     // through; fires on every reference (returns the cached handle on a hit), so it sees the name of each
