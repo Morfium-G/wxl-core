@@ -45,6 +45,14 @@ namespace wxl::game::unit
     { return model ? static_cast<off::ModelObject*>(model)->parent : nullptr; }
 
     /**
+     * @brief Reads the unit's owned CharacterComponent (the CMO the equip/attach pipeline operates on).
+     * @param unit  Unit object.
+     * @return The CharacterComponent, or null (non-humanoid unit, or none built yet).
+     */
+    inline void* CharacterComponent(void* unit)
+    { return unit ? static_cast<off::UnitObject*>(unit)->characterComponent : nullptr; }
+
+    /**
      * @brief Reads the reaction of self toward other.
      * @param self   Observing unit.
      * @param other  Observed unit.

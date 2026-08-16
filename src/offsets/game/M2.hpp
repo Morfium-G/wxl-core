@@ -876,6 +876,13 @@ namespace wxl::offsets::game::m2
     constexpr size_t kOffCmoRace      = 0x18; // uint32 race id
     constexpr size_t kOffCmoGender    = 0x1C; // uint32 gender (0 = male, 1 = female)
     constexpr size_t kOffCmoSceneNode = 0x38; // -> SceneNode (the root scene node for this character)
+    // Per-internal-model-slot cached item display id (uint32[0xC], slots 0..0xB), written by
+    // CharModelSlotDispatch on every real equip/clear event: it stores *itemDataPtr (the display id
+    // itself, not the raw pointer) at [this + kOffCmoSlotItemId + modelSlot*4]. Confirmed via
+    // disassembly 2026-08-16. Reading this directly for a freshly-resolved, live cmo gives the
+    // CURRENT persisted display id for that slot with no caching/staleness window at all -- the
+    // native engine keeps it current on every real event regardless of any extension.
+    constexpr size_t kOffCmoSlotItemId = 0x428;
 
     // --- SceneNode fields ---
     constexpr size_t kOffSceneNodeOwner = 0x28; // -> CharModelObject that owns this scene node

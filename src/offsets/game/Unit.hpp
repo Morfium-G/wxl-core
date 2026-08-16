@@ -63,6 +63,12 @@ namespace wxl::offsets::game::unit
     constexpr size_t kObjectHeaderField = 0x08;  // any object -> header carrying its GUID and type mask
     constexpr size_t kHeaderGuidField   = 0x00;  // header -> GUID
     constexpr size_t kHeaderTypeField   = 0x08;  // header -> type mask; what kGetObjectByGuid filters on
+    // unit object -> owned CharacterComponent (the equip/model render state CharEquipSlotUpdate and
+    // the geoset/attach pipeline operate on; null for non-humanoid units, or a humanoid unit with no
+    // component built yet). Confirmed via disassembly 2026-08-16 at two independent read sites gating
+    // CCharacterComponent__AddItemBySlot. Not the same field as kUnitModelField just above -- 0xB4 and
+    // 0xB4C are easy to misread as the same offset, they are not.
+    constexpr size_t kUnitCharacterComponentField = 0xB4C;
 
     // --- virtual slots shared by every object type ---
     // Every object type's descendants agree on this part of their vtable. Only these four are common:
@@ -98,16 +104,20 @@ namespace wxl::offsets::game::unit
     // with every member offset checked against a constant at compile time (a wrong padding fails the build).
     // Only known fields are named; the gaps are explicit padding. Pointers are 4 bytes on the 32-bit client.
 #pragma pack(push, 1)
-    /** @brief Unit / world object: the body-model slot and the world position. */
+    /** @brief Unit / world object: the body-model slot, the world position, and the owned character component. */
     struct UnitObject
     {
         uint8_t  _pad00[kUnitModelField];
         void*    model;            // kUnitModelField -> body model
         uint8_t  _pad01[kUnitPositionField - kUnitModelField - sizeof(void*)];
         float    position[3];      // kUnitPositionField -> world position x, y, z
+        uint8_t  _pad02[kUnitCharacterComponentField - kUnitPositionField - sizeof(float) * 3];
+        void*    characterComponent; // kUnitCharacterComponentField -> owned CharacterComponent
     };
     static_assert(offsetof(UnitObject, model) == kUnitModelField, "UnitObject.model");
     static_assert(offsetof(UnitObject, position) == kUnitPositionField, "UnitObject.position");
+    static_assert(offsetof(UnitObject, characterComponent) == kUnitCharacterComponentField,
+                  "UnitObject.characterComponent");
 
     /** @brief Object header: the GUID and the type mask the object lookup filters on. */
     struct ObjectHeader
