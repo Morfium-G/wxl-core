@@ -1801,7 +1801,10 @@ namespace wxl::offsets::game::m2
     constexpr uintptr_t kGetBoneSequenceInfo               = 0x008266B0;
     /// The cheapest query for what a model is playing right now, the natural anchor for an animation-
     /// state event. __thiscall, 1 stack arg.
+    /// GetBoneSequenceId(slot) -> seqId, slot=-1 = primary. Confirmed alongside SetBoneSequence's
+    /// own slot param, which mirrors this same concept (WXL-32/33, wxl-equip-extension).
     constexpr uintptr_t kGetBoneSequenceId                 = 0x008267E0;
+    using M2_GetBoneSequenceIdFn = uint32_t(__fastcall*)(void* instance, void* edx, uint32_t slot);
     /// React when an animation is cut short rather than ending naturally, which stock code gives no
     /// notification for. __thiscall, 2 stack args.
     constexpr uintptr_t kOnSequenceInterrupted             = 0x008269C0;
