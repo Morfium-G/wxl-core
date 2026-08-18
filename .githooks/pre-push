@@ -21,7 +21,10 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         range="$remote_sha..$local_sha"
     fi
 
-    matches=$(git diff "$range" -- . 2>/dev/null | grep -nE '^\+[^+].*\b(TODO|FIXME)\b' | grep -vE '\bTODO\(WXL-[0-9]+\)')
+    # ':!.githooks/pre-push' excludes this file's own diff from the scan -- it necessarily
+    # contains the literal words TODO/FIXME as part of the detection regex below, which would
+    # otherwise self-match the very first time this file is ever added or edited.
+    matches=$(git diff "$range" -- . ':!.githooks/pre-push' 2>/dev/null | grep -nE '^\+[^+].*\b(TODO|FIXME)\b' | grep -vE '\bTODO\(WXL-[0-9]+\)')
     if [ -n "$matches" ]; then
         echo "pre-push: found a TODO/FIXME with no ticket reference on $local_ref:"
         echo "$matches"
