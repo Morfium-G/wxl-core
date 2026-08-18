@@ -663,7 +663,7 @@ namespace wxl::offsets::game::m2
     constexpr uintptr_t kSetSequenceCallback = 0x00823FE0;
     constexpr uintptr_t kSetEventCallback    = 0x00824060;
     using M2_SetCallbackFn = void(__fastcall*)(void* renderCtx, void* edx, void* fn, void* userData, uint32_t extra);
-    // SetBoneSequence(slot, seqId, prevSeqId, prevSubSeqId, blendTime, loop, reset). __thiscall,
+    // SetBoneSequence(slot, seqId, prevSeqId, prevSubSeqId, blendTime, loop, primary). __thiscall,
     // ECX=the M2 instance, 7 stack params (ret 0x1c = 28 bytes). 67 real callers spanning character
     // creation/selection, hand micro-animations, and general gameplay code -- the client's
     // general-purpose "play sequence X on this model" entry point (also tentatively named
@@ -673,7 +673,13 @@ namespace wxl::offsets::game::m2
     // Param order confirmed 2026-08-18 (wxl-equip-extension WXL-32/33) -- the original guess above
     // ("seqId, subSeqId, ...") had the first two backwards:
     //   - slot (Param1): a SLOT selector, -1 = primary. Same concept GetBoneSequenceId's own `slot`
-    //     param uses. NOT part of the sequence id.
+    //     param uses. NOT part of the sequence id. Selects WHICH BONE this call targets -- it's the
+    //     model's own key_bone_id (see kOffHdrKeyBoneCount/kOffHdrKeyBoneArray, i.e. keyBoneLookup,
+    //     above): -1 shortcuts straight to bone index 0 without consulting that table at all; any
+    //     other value is looked up through it (out-of-range or a -1 entry there both mean "no such
+    //     bone on this model"). Entirely different axis from the primary/secondary split below
+    //     (which one of the RESOLVED bone's own two sequence slots gets written) -- "primary" is
+    //     unfortunately overloaded between the two, see that param for the disambiguation.
     //   - seqId (Param2): the actual sequence id being requested. Confirmed two independent ways:
     //     (a) this function's own entry logic checks THIS param against -1 to decide whether to
     //     early-out into UnsetBoneSequence; (b) traced through kResolveSequenceFallback into
@@ -683,15 +689,30 @@ namespace wxl::offsets::game::m2
     //     kResolveSequenceFallback consulted first -- confirmed to mean a sequence the target model
     //     doesn't define degrades gracefully (alias-chain resolution) rather than failing outright,
     //     verified against real content (WXL-33/34).
-    //   - prevSeqId/prevSubSeqId/blendTime/loop/reset -- still only best-guess from the one known
-    //     real call site (a doodad respawn: SetBoneSequence(-1, 0, -1, 0, 1.0f, 1, 1) in this
-    //     corrected order, i.e. slot=-1, seqId=0/Stand). NOT independently confirmed the way
-    //     slot/seqId now are.
+    //   - primary (Param7, renamed 2026-08-19 -- was guessed "reset"): NOT a reset flag. Confirmed via
+    //     disassembly to be a dispatch switch, per the resolved bone (see slot above), between this
+    //     function's own two already-named callees: true tail-calls kSetPrimaryBoneSequence
+    //     (0x00826C40) and writes seqId straight into that bone's kOffRtBonePendingSeq field (the
+    //     same field GetBoneSequenceId reads back); false tail-calls kSetSecondaryBoneSequence
+    //     (0x00826DD0) instead, which drives the bone's separate upper-body/layered slot (per its own
+    //     existing doc comment below) via different RuntimeBone fields (0x9C/0xA0/0xA4, not yet
+    //     individually confirmed/named, plus a further shared-setup call into kSetupBoneSequence,
+    //     0x00826B00). GetBoneSequenceId has NO path to read whatever the false/secondary branch
+    //     sets -- confirmed as the root cause of a real observed bug: an emote that plays through the
+    //     secondary slot (e.g. an upper-body-only emote played while the legs keep running on
+    //     whatever the primary slot already had) is completely invisible to any code that only polls
+    //     GetBoneSequenceId, even though it is genuinely playing. Whether the bone-selecting slot
+    //     param (Param1) and this primary/secondary split compose freely (i.e. whether non-root bones
+    //     also carry their own independent primary+secondary pair), and how to read the secondary
+    //     sequence back at all, is open -- see the wxl-equip-extension ticket tracking this.
+    //   - prevSeqId/prevSubSeqId/blendTime/loop -- still only best-guess from the one known real call
+    //     site (a doodad respawn: SetBoneSequence(-1, 0, -1, 0, 1.0f, 1, 1), i.e. slot=-1, seqId=0/
+    //     Stand, primary=1). NOT independently confirmed the way slot/seqId/primary now are.
     constexpr uintptr_t kSetBoneSequence = 0x00832AB0;
     using M2_SetBoneSequenceFn = void(__fastcall*)(void* instance, void* edx, uint32_t slot,
                                                      uint32_t seqId, uint32_t prevSeqId,
                                                      uint32_t prevSubSeqId, float blendTime,
-                                                     uint32_t loop, uint32_t reset);
+                                                     uint32_t loop, uint32_t primary);
     // GetSequenceIndexByAnimId_Variation(header, seqId, variationSkip) -> local sequence-array index
     // (0xFFFF if not found). NOT a member-function-style call the way most of this file's functions
     // are: all 3 real parameters are stack args, callee-cleaned (single `ret 0xc`) -- at least one
@@ -895,6 +916,18 @@ namespace wxl::offsets::game::m2
     constexpr size_t kOffSeqAliasNext      = 0x3E; // uint16: alias-chain target when kOffSeqFlags bit 0x40 is set
     constexpr size_t kOffHdrBoneCount      = 0x2C;
     constexpr size_t kOffHdrBoneArray      = 0x30; // -> bone records (post-fixup data ptr)
+    // keyBoneLookup (confirmed 2026-08-19, wxl-equip-extension WXL-38): the table SetBoneSequence/
+    // GetBoneSequenceId's own `slot` param resolves through when slot != -1 (matches the community-
+    // documented key_bone_lookup[] -- ArmL=0, ArmR=1, ..., Root=26, etc.; -1 = "no bone" per entry,
+    // NOT the same -1 as the slot param's own "skip the lookup, use bone 0 directly" shortcut).
+    // Confirmed via a live-memory-vs-file byte diff against a real player model (count=27, matching
+    // the community doc's own stated WotLK count exactly, every entry a sane in-range bone index) --
+    // NOT the same table as kOffHdrBoneIdxLutCount/Ptr below (0xF8/0xFC, already in core, used for
+    // equipment-to-character bone REMATCHING by BuildBoneRemap): the two were cross-checked against
+    // the same real model file and are genuinely different arrays (27 sparse entries vs 55 with a
+    // markedly different id-to-bone pattern), not two names for the same data.
+    constexpr size_t kOffHdrKeyBoneCount   = 0x34;
+    constexpr size_t kOffHdrKeyBoneArray   = 0x38; // -> int16 array, -1 = this model has no such key bone
     constexpr size_t kOffHdrAttachCount    = 0xF0; // attachment records
     constexpr size_t kOffHdrAttachPtr      = 0xF4; // -> attachment records (stride kAttachStride)
     constexpr size_t kAttachStride         = 0x28;
@@ -939,6 +972,11 @@ namespace wxl::offsets::game::m2
     constexpr size_t kOffRtBoneProcMatrix   = 0x88; // -> externally driven per-frame matrix (null = none)
     constexpr size_t kOffRtBoneFlagMask     = 0x8C; // uint32: runtime bone-flag override mask
     constexpr size_t kOffRtBonePendingSeq   = 0x90; // uint32: pending sequence bookkeeping (0xFFFFFFFF idle)
+    // Confirmed 2026-08-19 (wxl-equip-extension WXL-38): SetBoneSequence's primary write path
+    // (kSetBoneSequence's own `primary=1` branch) writes here alongside kOffRtBonePendingSeq in the
+    // same instruction sequence -- `mov [edi+0x90], eax` (seqId) immediately followed by
+    // `mov word ptr [edi+0x94], cx` (Param3, this project's own `prevSeqId`).
+    constexpr size_t kOffRtBonePrevSeqId    = 0x94; // uint16: SetBoneSequence's own prevSeqId param, as last written
     constexpr size_t kOffRtBoneBlendWeight  = 0xA8; // float: current blend weight (0 = none)
 
     // --- CharModelObject fields ---
@@ -1152,7 +1190,9 @@ namespace wxl::offsets::game::m2
         uint8_t  _pad24[kOffHdrBoneCount - (kOffHdrSeqPtr + sizeof(void*))];
         uint32_t boneCount;         // kOffHdrBoneCount
         void*    boneArray;         // kOffHdrBoneArray -> M2Bone records (post-fixup data ptr)
-        uint8_t  _pad34[kOffHdrAttachCount - (kOffHdrBoneArray + sizeof(void*))];
+        uint32_t keyBoneCount;      // kOffHdrKeyBoneCount
+        void*    keyBoneArray;      // kOffHdrKeyBoneArray -> int16 array, -1 = no such key bone
+        uint8_t  _pad3c[kOffHdrAttachCount - (kOffHdrKeyBoneArray + sizeof(void*))];
         uint32_t attachCount;       // kOffHdrAttachCount
         uint32_t attachPtr;         // kOffHdrAttachPtr -> M2Attachment records
         uint32_t boneIdxLutCount;   // kOffHdrBoneIdxLutCount (number of entries in the LUT)
@@ -1163,6 +1203,8 @@ namespace wxl::offsets::game::m2
     static_assert(offsetof(M2FileHeader, seqPtr)         == kOffHdrSeqPtr,          "M2FileHeader.seqPtr");
     static_assert(offsetof(M2FileHeader, boneCount)      == kOffHdrBoneCount,       "M2FileHeader.boneCount");
     static_assert(offsetof(M2FileHeader, boneArray)      == kOffHdrBoneArray,       "M2FileHeader.boneArray");
+    static_assert(offsetof(M2FileHeader, keyBoneCount)   == kOffHdrKeyBoneCount,    "M2FileHeader.keyBoneCount");
+    static_assert(offsetof(M2FileHeader, keyBoneArray)   == kOffHdrKeyBoneArray,    "M2FileHeader.keyBoneArray");
     static_assert(offsetof(M2FileHeader, attachCount)    == kOffHdrAttachCount,     "M2FileHeader.attachCount");
     static_assert(offsetof(M2FileHeader, attachPtr)      == kOffHdrAttachPtr,       "M2FileHeader.attachPtr");
     static_assert(offsetof(M2FileHeader, boneIdxLutCount)== kOffHdrBoneIdxLutCount, "M2FileHeader.boneIdxLutCount");
@@ -1307,7 +1349,8 @@ namespace wxl::offsets::game::m2
         uint32_t procMatrix;       // kOffRtBoneProcMatrix (-> externally driven 4x4; 0 = none)
         uint32_t flagMask;         // kOffRtBoneFlagMask (OR'd into the static bone flags)
         uint32_t pendingSeq;       // kOffRtBonePendingSeq (0xFFFFFFFF idle)
-        uint8_t  _pad94[kOffRtBoneBlendWeight - 0x94];
+        uint16_t prevSeqId;        // kOffRtBonePrevSeqId
+        uint8_t  _pad96[kOffRtBoneBlendWeight - (kOffRtBonePrevSeqId + sizeof(uint16_t))];
         float    blendWeight;      // kOffRtBoneBlendWeight (0 = no blend contribution)
     };
     static_assert(offsetof(RuntimeBone, transValue)  == kOffRtBoneTransValue,  "RuntimeBone.transValue");
@@ -1323,6 +1366,7 @@ namespace wxl::offsets::game::m2
     static_assert(offsetof(RuntimeBone, procMatrix)  == kOffRtBoneProcMatrix,  "RuntimeBone.procMatrix");
     static_assert(offsetof(RuntimeBone, flagMask)    == kOffRtBoneFlagMask,    "RuntimeBone.flagMask");
     static_assert(offsetof(RuntimeBone, pendingSeq)  == kOffRtBonePendingSeq,  "RuntimeBone.pendingSeq");
+    static_assert(offsetof(RuntimeBone, prevSeqId)   == kOffRtBonePrevSeqId,   "RuntimeBone.prevSeqId");
     static_assert(offsetof(RuntimeBone, blendWeight) == kOffRtBoneBlendWeight, "RuntimeBone.blendWeight");
     static_assert(sizeof(RuntimeBone) == kRuntimeBoneStride, "RuntimeBone size");
 
@@ -1802,7 +1846,9 @@ namespace wxl::offsets::game::m2
     /// The cheapest query for what a model is playing right now, the natural anchor for an animation-
     /// state event. __thiscall, 1 stack arg.
     /// GetBoneSequenceId(slot) -> seqId, slot=-1 = primary. Confirmed alongside SetBoneSequence's
-    /// own slot param, which mirrors this same concept (WXL-32/33, wxl-equip-extension).
+    /// own slot param, which mirrors this same concept (WXL-32/33, wxl-equip-extension) -- slot is
+    /// a key_bone_id resolved through kOffHdrKeyBoneCount/kOffHdrKeyBoneArray (keyBoneLookup), same
+    /// as SetBoneSequence's own slot param; returns kOffRtBonePendingSeq for the resolved bone.
     constexpr uintptr_t kGetBoneSequenceId                 = 0x008267E0;
     using M2_GetBoneSequenceIdFn = uint32_t(__fastcall*)(void* instance, void* edx, uint32_t slot);
     /// React when an animation is cut short rather than ending naturally, which stock code gives no
@@ -1812,10 +1858,12 @@ namespace wxl::offsets::game::m2
     /// looping for both. __thiscall, 5 stack args.
     constexpr uintptr_t kSetupBoneSequence                 = 0x00826B00;
     /// Intercept every primary animation start on a model, the main lever for animation remapping or
-    /// blending policy. __thiscall, 6 stack args.
+    /// blending policy. __thiscall, 6 stack args. This is what kSetBoneSequence's own `primary`
+    /// param (confirmed 2026-08-19) tail-calls when true.
     constexpr uintptr_t kSetPrimaryBoneSequence            = 0x00826C40;
     /// Same for the secondary (upper-body) slot, which is what drives layered animation. __thiscall, 5
-    /// stack args.
+    /// stack args. This is what kSetBoneSequence's own `primary` param tail-calls when false --
+    /// GetBoneSequenceId cannot see whatever this path sets (see kSetBoneSequence's own comment).
     constexpr uintptr_t kSetSecondaryBoneSequence          = 0x00826DD0;
     /// Scrub or freeze a running sequence, giving extensions frame-accurate control for cinematics and
     /// tools. __thiscall, 2 stack args.
