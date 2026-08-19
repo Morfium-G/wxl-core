@@ -47,12 +47,10 @@ namespace
     void __cdecl hkWorldEnter(int worldTime, int withLoadingScreen)
     {
         const auto mapId = static_cast<uint32_t>(*reinterpret_cast<int32_t*>(wld::kCurrentMapId));
-        WLOG_INFO("world: hkWorldEnter fired (leaving mapId=%u, withLoadingScreen=%d)", mapId, withLoadingScreen);
         ev::WorldLeaveArgs leave{ mapId }; // old world still loaded: id is the one being left
         ev::Emit(ev::Event::OnWorldLeave, &leave);
         g_origWorldEnter(worldTime, withLoadingScreen);
         const auto entered = static_cast<uint32_t>(*reinterpret_cast<int32_t*>(wld::kCurrentMapId));
-        WLOG_INFO("world: hkWorldEnter returned (entered mapId=%u)", entered);
         ev::WorldEnterArgs enter{ entered };
         ev::Emit(ev::Event::OnWorldEnter, &enter);
     }
@@ -75,10 +73,8 @@ namespace
 
     bool InstallWorld()
     {
-        const bool enterOk = wxl::hook::Install("CWorldEnter", wld::kEnter, &hkWorldEnter, &g_origWorldEnter);
-        const bool pumpOk  = wxl::hook::Install("FramePump", frame::kFramePump, &hkFramePump, &g_origFramePump);
-        WLOG_INFO("world: hook install results -- CWorldEnter=%s FramePump=%s",
-                  enterOk ? "ok" : "FAILED", pumpOk ? "ok" : "FAILED");
+        wxl::hook::Install("CWorldEnter", wld::kEnter, &hkWorldEnter, &g_origWorldEnter);
+        wxl::hook::Install("FramePump", frame::kFramePump, &hkFramePump, &g_origFramePump);
 
         // Liquid-row null guard: this one liquid consumer dereferences the LiquidType row flag without the
         // null check the others have, so an unknown liquid id (from any served source) faults. Skip the
