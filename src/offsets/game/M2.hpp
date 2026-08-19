@@ -1509,8 +1509,14 @@ namespace wxl::offsets::game::m2
     /// __thiscall, caller-cleaned.
     constexpr uintptr_t kCharCreateBaseTexture             = 0x004EFF10;
     /// The component allocator behind character composition, hookable to enlarge or pool differently.
-    /// __cdecl, caller-cleaned.
+    /// __cdecl, no stack args. Reads the pool handle at 0xB6B880, pulls a block off its free list via
+    /// SMem__ObjectAlloc, runs the block's constructor, returns it (or null on failure). Confirmed via
+    /// disassembly 2026-08-18: does NOT clear the block first -- a reused block still carries whatever
+    /// the previous occupant last wrote into it (e.g. kOffCmoSlotItemId), which is why hooking the
+    /// RETURN here is the correct place to zero stale per-slot data unconditionally, before any
+    /// per-slot resync gets a chance to read it back out as if it were real.
     constexpr uintptr_t kCharAllocComponent                = 0x004F0980;
+    using M2_CharAllocComponentFn = void*(__cdecl*)();
     /// The per-frame entry that rebuilds a character's composited appearance, the right place to force
     /// or suppress a rebuild. __thiscall, 1 stack arg.
     constexpr uintptr_t kCharRenderPrep                    = 0x004F1520;
