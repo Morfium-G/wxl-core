@@ -164,6 +164,7 @@ namespace wxl::runtime::extensions
             &wxl::ui::c::Combo,
             &wxl::ui::c::CollapsingHeader,
             &wxl::ui::c::InputText,
+            &wxl::ui::c::TextWrapped, // appended last -- matches UiTextWrapped's position in WXL_Api
         };
 
         // --- loading --------------------------------------------------------------------------

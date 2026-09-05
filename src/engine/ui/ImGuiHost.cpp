@@ -218,6 +218,16 @@ namespace wxl::ui
         void __cdecl Text(const char* text)
         { if (text) ImGui::TextUnformatted(text); }
 
+        void __cdecl TextWrapped(const char* text)
+        {
+            if (!text) return;
+            // PushTextWrapPos(0) == wrap at the window's right edge. TextUnformatted (not
+            // ImGui::TextWrapped) keeps the varargs off the C boundary, same as Text above.
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextUnformatted(text);
+            ImGui::PopTextWrapPos();
+        }
+
         void __cdecl Separator() { ImGui::Separator(); }
 
         int __cdecl Button(const char* label)

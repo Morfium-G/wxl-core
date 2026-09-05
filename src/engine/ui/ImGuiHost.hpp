@@ -52,6 +52,7 @@ namespace wxl::ui
         void __cdecl AddPanel(const char* title, void(__cdecl* fn)(void*), void* user);
         int  __cdecl IsOpen();
         void __cdecl Text(const char* text);
+        void __cdecl TextWrapped(const char* text);
         void __cdecl Separator();
         int  __cdecl Button(const char* label);
         int  __cdecl Checkbox(const char* label, int* value);
