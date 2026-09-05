@@ -252,6 +252,11 @@ typedef struct WXL_Api
      * @return non-zero on the frame the text changes.
      */
     int(__cdecl* UiInputText)(const char* label, char* buf, size_t bufSize);
+
+    /// Like UiText, but wraps at the window's right edge instead of running off it. Appended after
+    /// UiInputText -- check structSize before reading it if an older copy of this header may be in
+    /// play (same note as UiInputText above).
+    void(__cdecl* UiTextWrapped)(const char* text);
 } WXL_Api;
 
 /// The two entry points as the core resolves them, by name, out of a loaded extension.
