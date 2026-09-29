@@ -56,9 +56,21 @@ namespace wxl::offsets::game::m2
     using M2_BuildBatchMaterialFn = void* (__fastcall*)(void* model, void* edx, void* batchPtr);
 
     // Version-gate branches in the loader. The stock loader accepts only one inner version; these are
-    // the two compare branches that reject higher inner versions.
+    // the two compare branches that reject higher inner versions. Both read the MODEL body's inner
+    // version (body+0x04) and demand exactly 264, so a body that states anything else is refused.
     constexpr uintptr_t kVersionGateInit = 0x0083CF51; // version-too-high branch
+    // Inside kInitLowPrioritySequence: the gate a body must pass for a loaded .anim to be bound into
+    // its sequence's track slots at all. Past it, that function rebases the slots of one sequence
+    // index and CM2Shared__FinishLoadingLowPrioritySequence (0x0083CA90) then walks the aliasNext ring
+    // from it, rebasing every other member of the ring with the same buffer.
     constexpr uintptr_t kVersionGateAnim = 0x0083C745; // anim-parse version branch
+    // Binds a loaded .anim buffer into one sequence index's track slots: re-runs the header walk with
+    // the sequence index and the buffer in globals 0xAF59D8 / 0xD41258, which makes every plain-array
+    // reader a no-op and every per-sequence track slot of that index rebase onto the buffer.
+    constexpr uintptr_t kInitLowPrioritySequence = 0x0083C6E0;
+    // Builds the companion-file name for a sequence and queues the read. Follows aliasNext while the
+    // sequence's flags carry 0x40, so an alias asks for the file of the ring member that has the keys.
+    constexpr uintptr_t kLoadLowPrioritySequence = 0x0083DA10;
 
     // --- native modern-M2 direct-fill entry points (features/m2native) ---
     // The half of kInit that runs AFTER the header offset->pointer walk. Chooses the skin profile
@@ -1535,9 +1547,20 @@ namespace wxl::offsets::game::m2
     constexpr uintptr_t kTextureCacheRelease               = 0x004F31A0;
     /// Paints one region of the sheet from a source texture. Every region painter is a call to this
     /// with its own region index, and it returns without painting when the source carries no mip
-    /// chain -- a test it makes before looking at the source in any other way. It then reads mip
-    /// LEVEL 1, so the chain is where the pixels come from, not an optimisation. __cdecl.
+    /// chain -- a test it makes before looking at the source in any other way, so the chain is where
+    /// the pixels come from and not an optimisation.
+    /// It reads the source at the region's OWN corner, so the source it expects covers the whole
+    /// sheet and the region is a window onto it. It also clears the alpha-bit byte of its description
+    /// copy before either paste, which forces the opaque blit whatever the source actually carries.
+    /// The source level it asks for is found by halving the source width until it equals the sheet
+    /// resolution, counting the steps -- a width that is not a power-of-two multiple of that figure
+    /// never reaches the equality. __cdecl: (regionIndex, source, destLevels).
     constexpr uintptr_t kCharPaintRegion                   = 0x004F07D0;
+    /// The sibling copy, for a source authored AS the region: it reads from (0, 0) instead, and its
+    /// level search halves the source width down to the region's width rather than the sheet's. It
+    /// leaves the alpha-bit byte alone, so this is the one that can reach the masked, blend and
+    /// indexed-alpha blits. __cdecl, same arguments.
+    constexpr uintptr_t kCharPaintRegionFromOrigin         = 0x004F08A0;
     /// The mip-chain test that gate rests on. __cdecl, 1 stack arg.
     constexpr uintptr_t kTextureCacheHasMips               = 0x004F2D80;
     /// Copies one block of a source texture into the sheet, MAGNIFYING it by two: the source is read
@@ -1552,6 +1575,39 @@ namespace wxl::offsets::game::m2
     /// large body skin here and the smaller face and scalp sources to the magnifying copy above.
     /// __cdecl, same arguments plus that starting level.
     constexpr uintptr_t kCharPasteScale                    = 0x004EC550;
+    /// The opaque blit the magnifying copy delegates to, and where that copy's palette test actually
+    /// lives: it resolves the palette itself and RETURNS having written nothing when there is none.
+    /// So the two copies fail differently on a source they cannot read -- an untouched region here,
+    /// flat green from the fill below -- and a replacement has to cover both.
+    /// It doubles source level 0 into destination level 0, then hands the rest of the chain to the
+    /// one-for-one blit with every rectangle, the pitch and the source origin halved once, and the
+    /// destination level index offset by one.
+    /// __cdecl: (source, destLevels, destOrigin, destPitch, sourceOrigin, size, description).
+    constexpr uintptr_t kCharPasteOpaque                   = 0x004E89F0;
+    /// What the reducing copy calls instead when the source has no palette. It is not even handed the
+    /// source: its whole body writes 0xFF00FF00 per pixel, an opaque GREEN, over every level of the
+    /// region. A green body on screen is this, and it is why a source that is not palettised has to be
+    /// intercepted rather than left to fail quietly.
+    /// __cdecl: (destLevels, destOrigin, destPitch, size, description, firstLevel, -firstLevel).
+    constexpr uintptr_t kCharPasteNoPalette                = 0x004E82D0;
+    /// Byte 5 of the six-byte description both copies receive, which is kOffTexEntryAlphaBits seen
+    /// through that description. It selects the blit, and only the four values below exist; anything
+    /// else silently paints nothing.
+    constexpr size_t kOffSourceDescMode = 5;
+    constexpr uint8_t kSourceModeOpaque       = 0; ///< no alpha: the whole rectangle is overwritten
+    /// One alpha bit per pixel, in a plane of its own after the index plane: the pixel is written
+    /// opaque or it is left alone. Reducing, that is a test and nothing more; magnifying, the bit is
+    /// expanded to 0 or 255, averaged across the seams like any other channel and then weighed.
+    constexpr uint8_t kSourceModeMasked       = 1;
+    /// Four alpha bits per pixel, two to a byte in that same trailing plane, low nibble first. Each
+    /// nibble is expanded to `n | n << 4` before it weighs anything, which is why this mode and the
+    /// one below share their arithmetic once a source's alpha is a byte.
+    constexpr uint8_t kSourceModeBlend        = 4;
+    /// One alpha byte per pixel in that trailing plane. Both weighted modes combine as
+    /// `(source * a + destination * (255 - a)) >> 8` per channel -- a shift by eight over weights
+    /// that run to 255, so an opaque source pixel lands one part in 256 short of itself -- and state
+    /// the destination's own alpha as 255.
+    constexpr uint8_t kSourceModeIndexedAlpha = 8;
     /// The source's palette, or null. Both copies resolve it BEFORE looking at anything else, and a
     /// source that has none is dropped there: the magnifying copy returns outright, the reducing one
     /// calls a fill that is not even handed the source. Neither ever reaches its format dispatch. So
@@ -1581,12 +1637,31 @@ namespace wxl::offsets::game::m2
     /// args, caller-cleaned: (width, height, format, usage, flags, owner, filler, name, one). The
     /// name is a literal the caller supplies, which is what lets one creation be told from another.
     constexpr uintptr_t kTextureCreateSized                = 0x004B9200;
-    /// Names the rectangle of a texture that is about to be sent to the card.
-    /// __cdecl: (handle, one, zero, left, top, right, bottom, one). The section walk asks for the
-    /// whole sheet as (0, 0, resolution, resolution) -- square, from the one figure, which a layout
-    /// that is not square overruns.
+    /// The two section walks: they paint every dirty region of the composite and hand each painted
+    /// rectangle to the card. Both are __fastcall with the component in ecx and no stack args, and
+    /// both end a FULL rebuild -- kCharRebuildSheet set on the component -- by uploading
+    /// (0, 0, resolution, resolution) and returning, skipping the per-region uploads entirely. That
+    /// rectangle is the one square figure on both axes, so under a composite that is not square
+    /// everything outside it is composed correctly in the CPU image and never reaches the sheet
+    /// texture. The per-region uploads need no such correction: they read the live region table,
+    /// which already holds whatever arrangement the composite is painted in.
+    ///
+    /// This one runs from the per-frame render prep.
+    constexpr uintptr_t kCharPrepSections                  = 0x004EE0D0;
+    /// The same walk for a composition request that has come back from the composition thread,
+    /// reached from the per-frame component update -- so on the thread that owns the device, not on
+    /// the composition thread. Its full-rebuild branch is the same square upload.
+    constexpr uintptr_t kCharUpdateSections                = 0x004E9510;
+    /// Resolves a texture handle to the card-side texture, and takes NO rectangle:
+    /// __cdecl, 3 stack args, (handle, mode, callback), called as (handle, 1, 0) by everything that
+    /// composes. The rectangle visible at the section walks' call sites belongs to the update below,
+    /// whose arguments are pushed first and cleaned separately -- `add esp, 0x0C` for this call and
+    /// `add esp, 0x18` for that one. A decompiler folds the two argument lists into this one.
     constexpr uintptr_t kTextureGetGxTex                   = 0x004B6CB0;
-    /// Sends the rectangle named above to the card. __cdecl, 1 stack arg.
+    /// Marks a rectangle of that texture for upload to the card. __cdecl, 6 stack args,
+    /// caller-cleaned: (gxTex, left, top, right, bottom, immediate), stored as
+    /// {top, left, bottom, right} and handed to the device. A dirty region is named as
+    /// (x, y, x + w, y + h); a full rebuild as (0, 0, resolution, resolution).
     constexpr uintptr_t kGxTexUpdate                       = 0x00681F20;
     /// Texture cache entry. The six bytes from kOffTexEntryWidth are also what both copies receive as
     /// their "description" argument, laid out exactly as they are here.
@@ -1621,6 +1696,16 @@ namespace wxl::offsets::game::m2
     /// and only when those are enabled.
     constexpr uintptr_t kCharComposeImageCompressed        = 0x00B6B86C;
     constexpr uintptr_t kCharComposeImageThreaded          = 0x00B6B868;
+    /// One-time character-component setup, and the ONLY place the three images above are allocated.
+    /// It clamps its resolution argument to [6, 9] (and to 8 without compression), sets the sheet
+    /// resolution figure to 1 << n, derives the region arrangement from the shipped one as
+    /// `master >> (9 - n)`, then allocates the images square at that figure. Every allocation it
+    /// reaches -- including the composition requests' own images, through the threaded setup it calls
+    /// -- asks for exactly (figure, figure), which is what lets a different geometry be recognised
+    /// there. Called once at CVar registration, so a geometry meant to change those images has to be
+    /// set before that.
+    /// __cdecl: (gxFormat, resolution, threaded, compressed).
+    constexpr uintptr_t kCharComponentInitialize           = 0x004F1A20;
     /// Allocates one such image. __cdecl: (pixelFormat, width, height) -- two dimensions, unlike the
     /// figure the client fills them from.
     constexpr uintptr_t kTextureAllocMippedImg             = 0x004B7220;
@@ -1650,7 +1735,12 @@ namespace wxl::offsets::game::m2
     /// Component fields the load above writes.
     constexpr size_t kOffCharComponentRace    = 0x18;
     constexpr size_t kOffCharComponentSex     = 0x1C;
-    constexpr size_t kOffCharComponentDirty   = 0x0C;  ///< bitmask, one bit per region
+    /// Bitmask, one bit per region: the regions the composition still owes a repaint. The section
+    /// walk tests it region by region and reaches a region's painter ONLY for a set bit, so a region
+    /// whose bit is clear is not painted at all, whatever sources it holds. The walk's caller clears
+    /// the whole mask the moment the walk returns, so the mask can only be read from inside one --
+    /// after that it is zero and says nothing about the pass that just ran.
+    constexpr size_t kOffCharComponentDirty   = 0x0C;
     /// int[]: the loaded texture handle per (slot + sectionType * kSectionSlotCount).
     /// The composited sheet itself, once created. Zero until then, and the allocation is skipped for
     /// a component that already has one -- which is what makes a sheet outlive the rebuild that built

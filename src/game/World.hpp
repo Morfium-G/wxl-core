@@ -218,6 +218,23 @@ namespace wxl::game::world
     }
 
     /**
+     * @brief Reads which way an object is turned.
+     * @param obj  Any object.
+     * @return Orientation in radians counter-clockwise from +X, or zero when obj is null.
+     *
+     * The client's own callers pass this straight to fsincos and read the results as x and y, so a
+     * heading built from it is (cos, sin) and agrees with atan2(y, x) in both sign and zero point.
+     *
+     * A type that does not implement the slot reports whatever its stub reports, which is
+     * indistinguishable from genuinely facing east -- the same caveat Position carries about the
+     * origin.
+     */
+    inline float Facing(void* obj)
+    {
+        return obj ? detail::Virtual<off::FacingFn>(obj, off::kVtFacing)(obj) : 0.0f;
+    }
+
+    /**
      * @brief Reads the anchor above an object where the client hangs its name.
      * @param obj  Any object.
      * @param out  Receives x, y, z in out[0..2]; the origin when obj is null.

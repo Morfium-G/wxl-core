@@ -76,6 +76,12 @@ namespace wxl::offsets::game::unit
     constexpr size_t kVtNamePosition = 8;  // anchor above the model, where the client hangs the name
     constexpr size_t kVtPosition     = 11; // world position; the base implementation reports the origin
     constexpr size_t kVtRawPosition  = 12;
+    // Orientation, radians counter-clockwise from +X. Confirmed by disassembly 2026-09-11 at two
+    // independent call sites (0x004F6A96 and 0x00522112, the latter on the active player straight out
+    // of kGetObjectByGuid): both load slot 13, call it with this in ECX and nothing on the stack, and
+    // take the result off the FPU stack with fstp, which makes it a float return. Both then feed it
+    // straight to fsincos and store cos into x and sin into y, which is what fixes the convention:
+    // facing 0 points along +X and the angle increases counter-clockwise.
     constexpr size_t kVtFacing       = 13;
 
     // --- type masks ---
@@ -98,6 +104,8 @@ namespace wxl::offsets::game::unit
     using EnumStepFn         = int(__cdecl*)(uint32_t guidLow, uint32_t guidHigh, void* user);
     using EnumObjectsFn      = int(__cdecl*)(EnumStepFn step, void* user);
     using PositionFn         = void(__thiscall*)(void* self, float out[3]);
+    // No out-param and no stack argument, unlike PositionFn just above: the angle comes back in st(0).
+    using FacingFn           = float(__thiscall*)(void* self);
 
     // --- typed views over the objects above ---
     // The constants are the curated landmarks; these structs give named, typed access to the same fields,

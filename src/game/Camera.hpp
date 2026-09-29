@@ -117,6 +117,41 @@ namespace wxl::game::camera
         p[0] = pos[0]; p[1] = pos[1]; p[2] = pos[2];
     }
 
+    // --- the per-frame matrix build, as a detour target ---
+    // The view and projection globals above are rewritten every frame in world, so writing them there
+    // is overwritten before anything reads them. This is where that rewrite happens, and it is a
+    // look-at: the eye and the point it looks at go in, and everything the scene is drawn with comes
+    // out. A detour that adjusts the eye before calling through therefore moves the camera without
+    // owning the projection, the near and far planes, or the culling agreement that keeping View and
+    // ViewProj in step by hand would demand.
+    //
+    // Confirmed by disassembly 2026-09-11: at 0x007954A6 the entry copies three floats from the first
+    // argument into kCameraPos and three from the second into the slot above it, then subtracts the
+    // first from the second to get the view direction. Its one caller (0x007832ED) cleans eight bytes
+    // off the stack after the call, which fixes it as __cdecl with two arguments.
+
+    /// Entry the world's view and projection are built by, once per frame.
+    constexpr uintptr_t kBuildMatricesSeam = off::kBuildCameraMatrices;
+
+    /// Its signature: (eye, target), both float[3] in world coordinates.
+    using BuildMatricesFn = void(__cdecl*)(const float eye[3], const float target[3]);
+
+    /// The name the core registers kBuildMatricesSeam under, for HookAttachByName.
+    inline constexpr char kBuildMatricesPoint[] = "Camera.BuildMatrices";
+
+    /**
+     * @brief Writes the field of view on an active-camera object.
+     * @param camera  an object from GetActiveCamera(); ignored when null.
+     * @param fovRad  full vertical field of view in radians.
+     *
+     * The counterpart to GetFov. In world the engine sets this from its own state each frame, so it
+     * holds only for the frame it is written in and belongs wherever that frame is being shaped.
+     */
+    inline void SetFov(void* camera, float fovRad)
+    {
+        if (camera) *reinterpret_cast<float*>(static_cast<uint8_t*>(camera) + off::kCameraFov) = fovRad;
+    }
+
     // --- supplying a camera the world renderer accepts ---
     // The world scene render takes its camera from the world frame and dereferences it without
     // checking. In world there always is one; anywhere else there is not, and it has to be lent one.

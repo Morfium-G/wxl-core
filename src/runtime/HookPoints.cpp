@@ -20,6 +20,7 @@
 #include "common/Log.hpp"
 #include "engine/hook/Hook.hpp"
 
+#include "offsets/engine/Addon.hpp"
 #include "offsets/engine/Boot.hpp"
 #include "offsets/engine/Camera.hpp"
 #include "offsets/engine/Frame.hpp"
@@ -52,6 +53,7 @@ namespace wxl::runtime::hookpoints
         namespace adt    = wxl::offsets::game::adt;
         namespace boot   = wxl::offsets::engine::boot;
         namespace cam    = wxl::offsets::engine::camera;
+        namespace addon  = wxl::offsets::engine::addon;
         namespace db2    = wxl::offsets::game::db2;
         namespace dd     = wxl::offsets::game::doodad;
         namespace frm    = wxl::offsets::engine::frame;
@@ -117,6 +119,16 @@ namespace wxl::runtime::hookpoints
             { "Lua.FillScriptMethodTable",                 lua::kFillScriptMethodTable },
             { "Lua.ValidateFunctionPointer",               lua::kValidateFunctionPointer },
             { "Lua.GetObjectThis",                         lua::kGetObjectThis },
+
+            // --- addon manifests and the interface signature ------------------------------------------
+            { "Addon.LoadAddOnInfo",                       addon::kLoadAddOnInfo },
+            { "Addon.CheckSignature",                      addon::kCheckSignature },
+            { "Addon.ComputeInterfaceDigest",              addon::kComputeInterfaceDigest },
+            { "Addon.ProcessFileForMakeSign",              addon::kProcessFileForMakeSign },
+            { "Addon.VerifySignatureBlob",                 addon::kVerifySignatureBlob },
+            { "Addon.SignatureInit",                       addon::kSignatureInit },
+            { "Addon.SignatureUpdate",                     addon::kSignatureUpdate },
+            { "Addon.SignatureVerify",                     addon::kSignatureVerify },
 
             // --- allocator and caches ----------------------------------------------------------------
             { "Mem.Alloc",                                 mem::kAlloc },

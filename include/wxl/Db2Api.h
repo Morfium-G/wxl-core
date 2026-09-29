@@ -112,6 +112,13 @@ typedef struct WXL_Db2Api
 
     uint32_t(__cdecl* LayoutHash)(void* table);
     uint32_t(__cdecl* TableHash)(void* table);
+
+    /// Inline string field by name, element 0 for scalars. NULL for a null table, a null row, an
+    /// unknown field, a column that is not an inline string, or a row whose section carries no usable
+    /// string block -- a TACT-encrypted section is that last case. An empty string is "", not NULL.
+    /// Version 2 appends this at the end of the struct: WXL_Db2Api only ever grows there, which is
+    /// what structSize measures.
+    const char*(__cdecl* String)(void* table, const void* row, const char* field, uint32_t element);
 } WXL_Db2Api;
 
 #ifdef __cplusplus
