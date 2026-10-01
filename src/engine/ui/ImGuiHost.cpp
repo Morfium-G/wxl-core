@@ -56,6 +56,7 @@ namespace
         const char*      title;
         wxl::ui::PanelFn fn;
         void*            user;
+        bool             open;   // starts visible; the window's close button or SetPanelOpen hides it
     };
 
     constexpr int kMaxPanels = 16;
@@ -119,7 +120,9 @@ namespace
 
         for (int i = 0; i < g_panelCount; ++i)
         {
-            if (ImGui::Begin(g_panels[i].title)) g_panels[i].fn(g_panels[i].user);
+            if (!g_panels[i].open) continue;
+            // Begin's p_open gives the window its own close [x], which writes back to .open.
+            if (ImGui::Begin(g_panels[i].title, &g_panels[i].open)) g_panels[i].fn(g_panels[i].user);
             ImGui::End();
         }
 
@@ -201,7 +204,29 @@ namespace wxl::ui
     void AddPanel(const char* title, PanelFn fn, void* user)
     {
         if (g_panelCount >= kMaxPanels || !title || !fn) return;
-        g_panels[g_panelCount++] = Panel{ title, fn, user };
+        g_panels[g_panelCount++] = Panel{ title, fn, user, true };
+    }
+
+    void SetPanelOpen(const char* title, bool open)
+    {
+        if (!title) return;
+        for (int i = 0; i < g_panelCount; ++i)
+            if (std::strcmp(g_panels[i].title, title) == 0) { g_panels[i].open = open; return; }
+    }
+
+    bool IsPanelOpen(const char* title)
+    {
+        if (!title) return false;
+        for (int i = 0; i < g_panelCount; ++i)
+            if (std::strcmp(g_panels[i].title, title) == 0) return g_panels[i].open;
+        return false;
+    }
+
+    int PanelCount() { return g_panelCount; }
+
+    const char* PanelTitle(int index)
+    {
+        return (index >= 0 && index < g_panelCount) ? g_panels[index].title : nullptr;
     }
 
     bool IsOpen() { return g_open; }
@@ -214,6 +239,18 @@ namespace wxl::ui
         { wxl::ui::AddPanel(title, fn, user); }
 
         int __cdecl IsOpen() { return g_open ? 1 : 0; }
+
+        // Registry-only, so unlike the rest of this namespace these are also safe to call from
+        // WXL_Load (e.g. a module that wants its panel hidden until asked for).
+        void __cdecl SetPanelOpen(const char* title, int open)
+        { wxl::ui::SetPanelOpen(title, open != 0); }
+
+        int __cdecl IsPanelOpen(const char* title)
+        { return wxl::ui::IsPanelOpen(title) ? 1 : 0; }
+
+        int __cdecl PanelCount() { return wxl::ui::PanelCount(); }
+
+        const char* __cdecl PanelTitle(int index) { return wxl::ui::PanelTitle(index); }
 
         void __cdecl Text(const char* text)
         { if (text) ImGui::TextUnformatted(text); }
