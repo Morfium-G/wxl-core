@@ -169,6 +169,7 @@ namespace wxl::runtime::extensions
             &wxl::ui::c::IsPanelOpen,
             &wxl::ui::c::PanelCount,    // ... then UiPanelCount / UiPanelTitle
             &wxl::ui::c::PanelTitle,
+            &wxl::ui::c::TextColored,   // ... then UiTextColored
         };
 
         // --- loading --------------------------------------------------------------------------

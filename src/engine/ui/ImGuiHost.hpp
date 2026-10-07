@@ -66,6 +66,7 @@ namespace wxl::ui
         const char* __cdecl PanelTitle(int index);
         void __cdecl Text(const char* text);
         void __cdecl TextWrapped(const char* text);
+        void __cdecl TextColored(const float rgba[4], const char* text);
         void __cdecl Separator();
         int  __cdecl Button(const char* label);
         int  __cdecl Checkbox(const char* label, int* value);

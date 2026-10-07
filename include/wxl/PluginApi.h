@@ -275,6 +275,11 @@ typedef struct WXL_Api
     /// range). Registry-only, like UiSetPanelOpen.
     int(__cdecl* UiPanelCount)(void);
     const char*(__cdecl* UiPanelTitle)(int index);
+
+    /// Like UiText, in a colour: four floats in 0..1, red first (as UiColorEdit). Appended after
+    /// UiPanelTitle -- check structSize before reading it if an older copy of this header may be in
+    /// play (same note as UiInputText above).
+    void(__cdecl* UiTextColored)(const float rgba[4], const char* text);
 } WXL_Api;
 
 /// The two entry points as the core resolves them, by name, out of a loaded extension.

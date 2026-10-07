@@ -265,6 +265,17 @@ namespace wxl::ui
             ImGui::PopTextWrapPos();
         }
 
+        void __cdecl TextColored(const float rgba[4], const char* text)
+        {
+            if (!text) return;
+            if (!rgba) { ImGui::TextUnformatted(text); return; }
+            // PushStyleColor + TextUnformatted (not ImGui::TextColored) keeps the varargs off the C
+            // boundary, same as Text above.
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgba[0], rgba[1], rgba[2], rgba[3]));
+            ImGui::TextUnformatted(text);
+            ImGui::PopStyleColor();
+        }
+
         void __cdecl Separator() { ImGui::Separator(); }
 
         int __cdecl Button(const char* label)
